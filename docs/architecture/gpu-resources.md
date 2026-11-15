@@ -1,7 +1,7 @@
 # GPU リソースと VRAM の内訳
 
 Aether がデバイス上に作るもの、借りるもの、その寿命と計上のしかたをまとめます。
-実装は `src/Aether.Native/Resources/GpuResources.{h,cpp}`（GPU リソースマネージャー）と `Resources/ResourceRegistry.{h,cpp}`（登録簿）、内訳の組み立ては `Diagnostics.cpp` の `BuildVramReport`。
+実装は `src/AetherGraphics.Native/Resources/GpuResources.{h,cpp}`（GPU リソースマネージャー）と `Resources/ResourceRegistry.{h,cpp}`（登録簿）、内訳の組み立ては `Diagnostics.cpp` の `BuildVramReport`。
 
 ## 二つの部品
 

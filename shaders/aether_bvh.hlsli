@@ -1,5 +1,5 @@
 // Rays through the scene's triangles with DXR 1.1 (inline ray tracing, RayQuery): the hardware walks the
-// acceleration structures src/Aether.Native/Renderer/Bvh.cpp builds (a bottom level structure per mesh, a top level
+// acceleration structures src/AetherGraphics.Native/Renderer/Bvh.cpp builds (a bottom level structure per mesh, a top level
 // one over the frame's instances). The triangles' data for shading a hit (texture coordinates, sub mesh) is in
 // g_BvhTris, in the order the structures hold them: a hit's instance ID (its mesh's first triangle) plus its
 // primitive index is its place there; its instance index is its place in g_TlasInstances.

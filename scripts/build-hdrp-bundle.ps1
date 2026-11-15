@@ -1,5 +1,5 @@
 # Builds build\unity\aether_hdrp_dx12.bundle: HDRP's runtime compute shaders compiled for Direct3D 12 (the game ships
-# them without DX12 kernels; see unity\Assets\Aether\Editor\BuildHdrpDx12Bundle.cs). Only needed once per HDRP version.
+# them without DX12 kernels; see unity\Assets\AetherGraphics\Editor\BuildHdrpDx12Bundle.cs). Only needed once per HDRP version.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-hdrp-bundle.ps1 [-Project <dir>] [-Unity <Unity.exe>]
 #
@@ -35,11 +35,11 @@ if (-not (Test-Path (Join-Path $Project 'Packages\manifest.json'))) {
 }
 
 # the editor script (the project keeps what Unity generates next to it)
-$target = Join-Path $Project 'Assets\Aether\Editor'
+$target = Join-Path $Project 'Assets\AetherGraphics\Editor'
 New-Item -ItemType Directory -Force $target | Out-Null
-Copy-Item -Force (Join-Path $repo 'unity\Assets\Aether\Editor\*.cs') $target
+Copy-Item -Force (Join-Path $repo 'unity\Assets\AetherGraphics\Editor\*.cs') $target
 # the game's HDRP settings the variants are built for
-Copy-Item -Force (Join-Path $repo 'unity\hdrp-game-settings.json') (Join-Path $Project 'Assets\Aether\hdrp-game-settings.json')
+Copy-Item -Force (Join-Path $repo 'unity\hdrp-game-settings.json') (Join-Path $Project 'Assets\AetherGraphics\hdrp-game-settings.json')
 
 $out = Join-Path $Project 'Build\Aether'
 $log = Join-Path $Project 'Logs\aether_build.log'

@@ -3,14 +3,16 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 [-Loader BepInEx|Ksl] [-Config RelWithDebInfo] [-GameDir <dir>] [-Build] [-Remove]
 #
 # -Loader BepInEx (default): BepInEx 5 must be installed in the game folder (docs/development/build.md).
-#   BepInEx\plugins\Aether\Aether.dll               the plugin (no signing)
-#   BepInEx\plugins\Aether\native\AetherNative.dll  the native runtime (the plugin copies it to <Game>_Data\Plugins\x86_64 on start)
-#   BepInEx\plugins\Aether\native\dxcompiler.dll, dxil.dll  DXC for the DXR shaders (the Windows SDK's redistributables)
-#   BepInEx\plugins\Aether\shaders\*.hlsl, hdrp\aether_hdrp_dx12.bundle
-#   Settings: BepInEx\config\Aether. A copy of Aether left in kino\mods (KSL) is removed so that it cannot start twice.
-# -Loader Ksl: kino\mods\Aether.ksm (signed by tools\maykr.exe with the build key, else the raw Aether.dll) and
-#   kino\mods\Aether\ for the native runtime, shaders and bundle. Settings: kino\config\Aether.
-# -Build builds everything first. -Remove deletes Aether's files for that loader (settings are kept).
+#   BepInEx\plugins\AetherGraphics\AetherGraphics.dll               the plugin (no signing)
+#   BepInEx\plugins\AetherGraphics\native\AetherGraphicsNative.dll  the native runtime (the plugin copies it to <Game>_Data\Plugins\x86_64 on start)
+#   BepInEx\plugins\AetherGraphics\native\dxcompiler.dll, dxil.dll  DXC for the DXR shaders (the Windows SDK's redistributables)
+#   BepInEx\plugins\AetherGraphics\shaders\*.hlsl, hdrp\aether_hdrp_dx12.bundle
+#   Settings: BepInEx\config\AetherGraphics. A copy left in kino\mods (KSL) is removed so that it cannot start twice.
+# -Loader Ksl: kino\mods\AetherGraphics.ksm (signed by tools\maykr.exe with the build key, else the raw AetherGraphics.dll) and
+#   kino\mods\AetherGraphics\ for the native runtime, shaders and bundle. Settings: kino\config\AetherGraphics.
+# An install under the old name (Aether: plugins\Aether, config\Aether, AetherNative.dll) is moved to the new one: its logs,
+# captures, benchmarks and settings are kept, its old DLLs removed.
+# -Build builds everything first. -Remove deletes Aether Graphics' files for that loader (settings are kept).
 # Nothing of the game's own files is changed.
 param(
 	[ValidateSet('BepInEx', 'Ksl')][string]$Loader = 'BepInEx',
@@ -26,13 +28,24 @@ if (Get-Process | Where-Object { $_.ProcessName -like 'Drift Racing Online*' }) 
 $kslMods = Join-Path $GameDir 'kino\mods'
 if ($Loader -eq 'BepInEx') {
 	if (-not (Test-Path (Join-Path $GameDir 'BepInEx\core\BepInEx.dll'))) { Write-Host "DEPLOY FAILED: BepInEx is not installed in $GameDir (docs/development/build.md)"; exit 1 }
-	$modData = Join-Path $GameDir 'BepInEx\plugins\Aether'
+	$modData = Join-Path $GameDir 'BepInEx\plugins\AetherGraphics'
 } else {
 	if (-not (Test-Path $kslMods)) { Write-Host "DEPLOY FAILED: $kslMods not found (is KSL installed? pass -GameDir)"; exit 1 }
-	$modData = Join-Path $kslMods 'Aether'
+	$modData = Join-Path $kslMods 'AetherGraphics'
 }
-$plugin = Get-ChildItem $GameDir -Directory -Filter '*_Data' | ForEach-Object { Join-Path $_.FullName 'Plugins\x86_64\AetherNative.dll' } | Select-Object -First 1
-$kslFiles = @((Join-Path $kslMods 'Aether.dll'), (Join-Path $kslMods 'Aether.ksm'))
+$plugin = Get-ChildItem $GameDir -Directory -Filter '*_Data' | ForEach-Object { Join-Path $_.FullName 'Plugins\x86_64\AetherGraphicsNative.dll' } | Select-Object -First 1
+$kslFiles = @((Join-Path $kslMods 'AetherGraphics.dll'), (Join-Path $kslMods 'AetherGraphics.ksm'))
+
+# the old name (Aether, until 0.3.0): move its folders to the new names, remove its DLLs (the old plugin and the new one
+# must not both start)
+$configRoot = if ($Loader -eq 'BepInEx') { Join-Path $GameDir 'BepInEx\config' } else { Join-Path $GameDir 'kino\config' }
+foreach ($pair in @(@((Join-Path (Split-Path $modData) 'Aether'), $modData), @((Join-Path $configRoot 'Aether'), (Join-Path $configRoot 'AetherGraphics')))) {
+	if ((Test-Path $pair[0]) -and -not (Test-Path $pair[1])) { Move-Item $pair[0] $pair[1]; Write-Host "moved $($pair[0]) to $($pair[1])" }
+}
+$legacy = @((Join-Path $modData 'Aether.dll'), (Join-Path $modData 'native\AetherNative.dll'), (Join-Path $modData 'native\AetherNative.pdb'),
+	(Join-Path $kslMods 'Aether.dll'), (Join-Path $kslMods 'Aether.ksm'))
+$legacy += Get-ChildItem $GameDir -Directory -Filter '*_Data' | ForEach-Object { Join-Path $_.FullName 'Plugins\x86_64\AetherNative.dll' }
+foreach ($f in $legacy) { if (Test-Path $f) { Remove-Item -Force $f; Write-Host "removed the old-name file $f" } }
 
 if ($Remove) {
 	$files = @($plugin)
@@ -46,12 +59,12 @@ if ($Remove) {
 if ($Build) {
 	& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build-native.ps1') -Config $Config
 	if ($LASTEXITCODE -ne 0) { exit 1 }
-	& dotnet build (Join-Path $repo 'src\Aether.Managed\Aether.Managed.csproj') -c Release -nologo -v q "-p:GameDir=$GameDir" "-p:Loader=$Loader"
+	& dotnet build (Join-Path $repo 'src\AetherGraphics.Managed\AetherGraphics.Managed.csproj') -c Release -nologo -v q "-p:GameDir=$GameDir" "-p:Loader=$Loader"
 	if ($LASTEXITCODE -ne 0) { Write-Host 'DEPLOY FAILED: the C# mod did not build'; exit 1 }
 }
 
-$native = Join-Path $repo "build\native\$Config\AetherNative.dll"
-$managed = Join-Path $repo "build\managed\$Loader\Release\Aether.dll"
+$native = Join-Path $repo "build\native\$Config\AetherGraphicsNative.dll"
+$managed = Join-Path $repo "build\managed\$Loader\Release\AetherGraphics.dll"
 foreach ($f in $native, $managed) { if (-not (Test-Path $f)) { Write-Host "DEPLOY FAILED: $f not found (run with -Build)"; exit 1 } }
 
 $nativeDir = Join-Path $modData 'native' # a sub-folder: the loaders look at the .dll files next to the mod as possible mods
@@ -77,7 +90,7 @@ if (Test-Path $bundle) {
 if ($Loader -eq 'BepInEx') {
 	Copy-Item -Force $managed $modData
 	foreach ($f in $kslFiles) { if (Test-Path $f) { Remove-Item -Force $f; Write-Host "removed the KSL copy $f (Aether must not be started by two loaders)" } }
-	Write-Host "plugin: $modData\Aether.dll"
+	Write-Host "plugin: $modData\AetherGraphics.dll"
 } else {
 	$ksm = $kslFiles[1]
 	$signed = (Test-Path $ksm) -and ((Get-Item $ksm).LastWriteTimeUtc -ge (Get-Item $managed).LastWriteTimeUtc)
@@ -87,7 +100,7 @@ if ($Loader -eq 'BepInEx') {
 	} else {
 		Remove-Item -Force -ErrorAction SilentlyContinue $ksm
 		Copy-Item -Force $managed $kslMods
-		Write-Host "mod: $kslMods\Aether.dll (RAW dll: KSL loads it only for accounts allowed to load raw dlls; build the .ksm with maykr and the build key)"
+		Write-Host "mod: $kslMods\AetherGraphics.dll (RAW dll: KSL loads it only for accounts allowed to load raw dlls; build the .ksm with maykr and the build key)"
 	}
 }
 Write-Host "native runtime and shaders: $modData"

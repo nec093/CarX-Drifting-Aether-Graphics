@@ -1,17 +1,17 @@
 # MCP API リファレンス
 
-`Aether.MCP.exe` は stdio の MCP サーバーです（JSON-RPC 2.0、1 行 1 メッセージ、プロトコル `2025-06-18` / `2025-03-26` / `2024-11-05`）。
-ゲームの中の Aether ランタイムとは、名前付きパイプ `\\.\pipe\Aether.Runtime` で話します。パイプを開けるのは、この PC の同じユーザー（と SYSTEM）だけです。リモートからの接続は受け付けません。
-各ツールの入力・出力スキーマは `tools/list` が返します（定義は `src/Aether.MCP/Tools/ToolCatalog.cs`、ランタイム側の処理は `src/Aether.Native/Ipc/Api.cpp`）。
+`AetherGraphics.MCP.exe` は stdio の MCP サーバーです（JSON-RPC 2.0、1 行 1 メッセージ、プロトコル `2025-06-18` / `2025-03-26` / `2024-11-05`）。
+ゲームの中の Aether ランタイムとは、名前付きパイプ `\\.\pipe\AetherGraphics.Runtime` で話します。パイプを開けるのは、この PC の同じユーザー（と SYSTEM）だけです。リモートからの接続は受け付けません。
+各ツールの入力・出力スキーマは `tools/list` が返します（定義は `src/AetherGraphics.MCP/Tools/ToolCatalog.cs`、ランタイム側の処理は `src/AetherGraphics.Native/Ipc/Api.cpp`）。
 
 ```
-Aether.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
+AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 ```
 
 | 引数 / 環境変数 | 意味 |
 |---|---|
 | `--allow-control` / `AETHER_MCP_ALLOW_CONTROL=1` | 操作ツールを提供する。無ければ読み取り専用 |
-| `--pipe <name>` / `AETHER_PIPE_NAME` | パイプ名（`\\.\pipe\` を除く）。既定 `Aether.Runtime` |
+| `--pipe <name>` / `AETHER_GRAPHICS_PIPE_NAME` | パイプ名（`\\.\pipe\` を除く）。既定 `AetherGraphics.Runtime` |
 | `--list-tools` | ツール名を一覧して終わる（操作ツールには `[control]`） |
 
 コマンドラインから 1 回呼ぶには `scripts\mcp-call.ps1 <tool> [key=value ...] [-AllowControl] [-Raw]`。
@@ -71,7 +71,7 @@ Aether.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 | `capture_render_graph` | なし | レンダーグラフを JSON で `captures\` に保存して返す |
 | `run_benchmark` | `seconds`（1〜600、既定 10）、`label`（64 文字まで、既定 `mcp`）、`wait`（既定 true）、`vsync`（既定 true） | 指定秒数だけ計測して JSON で `benchmarks\` に保存し、結果を返す（平均 FPS、1% low、フレーム時間、GPU 時間、VRAM の開始 / 終了 / 最大、リソース統計、レンダーグラフ）。`vsync: false` で計測中だけ VSync とフレームレート上限を外す。`wait: false` ならすぐ返るので `get_benchmark` で待つ |
 
-`captures\` と `benchmarks\` は Aether のデータフォルダー（BepInEx なら `BepInEx\plugins\Aether\`）の下です。
+`captures\` と `benchmarks\` は Aether のデータフォルダー（BepInEx なら `BepInEx\plugins\AetherGraphics\`）の下です。
 
 ### set_render_mode
 
@@ -115,7 +115,7 @@ Aether.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 
 ### set_graphics_option のオプション
 
-受け付けるのは次の 27 個です（`Api.cpp` の `kOptions`）。範囲の検証は設定と同じ（`src/Aether.Native/Core/Config.cpp`）です。
+受け付けるのは次の 27 個です（`Api.cpp` の `kOptions`）。範囲の検証は設定と同じ（`src/AetherGraphics.Native/Core/Config.cpp`）です。
 
 | オプション | 値 | 内容 |
 |---|---|---|
@@ -193,4 +193,4 @@ D3D12 のデバイス、リソースの寿命、任意のコードの実行に�
 - 応答：`{"id":1,"ok":true,"result":{...}}` または `{"id":1,"ok":false,"error":{"code":"...","message":"..."}}`
 
 メソッド名はツール名と同じです。ほかに `ping`（`get_status` と同じ）、`get_capture`（`id` を渡してキャプチャの状態を読む）、`stop_benchmark`（操作）があります。`control` が true になるのは、`--allow-control` のサーバーが操作ツールを呼んだときだけです。
-パイプのインスタンスは最大 4 本、1 要求は 1 MB までです。実装は `src/Aether.Native/Ipc/`（ランタイム側）と `src/Aether.MCP/IPC/RuntimeClient.cs`（サーバー側）。
+パイプのインスタンスは最大 4 本、1 要求は 1 MB までです。実装は `src/AetherGraphics.Native/Ipc/`（ランタイム側）と `src/AetherGraphics.MCP/IPC/RuntimeClient.cs`（サーバー側）。

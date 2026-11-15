@@ -94,7 +94,7 @@ Aether が描く絵の各要素と、その設定です。パスの順序やバ�
 
 ## アンビエントオクルージョン
 
-シェーダー：`shaders/scene_post.hlsl`（`PSAoRays`、従来の `PSAmbientOcclusion`、`PSAmbientOcclusionBlur`）、`src/Aether.Native/Renderer/NrdPasses.hlsl`（`CSLightPrepare`、`CSLightResolve`）
+シェーダー：`shaders/scene_post.hlsl`（`PSAoRays`、従来の `PSAmbientOcclusion`、`PSAmbientOcclusionBlur`）、`src/AetherGraphics.Native/Renderer/NrdPasses.hlsl`（`CSLightPrepare`、`CSLightResolve`）
 
 - **レイトレースの AO**（機能 `rayTracedLighting`、既定オン）：2 × 2 画素に 1 本、法線のまわりの余弦分布の方向へ `aoRadius` の長さの光線を飛ばす（MathLib のサンプリング）。当たった先の色（前フレームの絵に写っていればそこから、なければ反射と同じ着色）が近くの面からの照り返しになる。NVIDIA NRD の REBLUR_DIFFUSE で照り返しと当たり距離をノイズ除去し、当たり距離（光線の長さに対する割合）を遮蔽とする。結果は影と同じく、深度を見て全解像度に戻す。
 - **従来の SSAO**（`rayTracedLighting` オフ、または DXR 1.1 の無い GPU）：Intel XeGTAO（MIT、`third_party/XeGTAO`）の主パスの移植。全解像度の深度から、画素ごとに 3 方向 × 3 歩で地平線を探す。ぼかしと時間方向の平均は Aether 自身のもの。照り返しもこのパスで前フレームの絵から集める。
@@ -109,7 +109,7 @@ Aether が描く絵の各要素と、その設定です。パスの順序やバ�
 
 ## タイヤスモークとパーティクル
 
-コード：`src/Aether.Managed/SceneCapture/SmokeSimulation.cs`、`src/Aether.Native/Renderer/Smoke.cpp`、`shaders/scene_particles.hlsl`
+コード：`src/AetherGraphics.Managed/SceneCapture/SmokeSimulation.cs`、`src/AetherGraphics.Native/Renderer/Smoke.cpp`、`shaders/scene_particles.hlsl`
 
 - ゲームのパーティクルシステムは、生きている粒子を CPU で読み、カメラを向く四角として描く（ビルボードと引き伸ばしビルボード）。
 - タイヤスモークは、発生（どこから何個、色）だけゲームのエミッターから受け取り、動きと描画は Aether 独自：
@@ -137,7 +137,7 @@ Aether が描く絵の各要素と、その設定です。パスの順序やバ�
 
 ## フリーカメラとパストレーシング
 
-シェーダー：`shaders/scene_post.hlsl`（`PSPathTrace`、`PSPathTraceApply`）。入力：`src/Aether.Native/ImGui/Overlay.cpp`（`HandleFreeCamera`）、`src/Aether.Managed/Diagnostics/FreeCamera.cs`
+シェーダー：`shaders/scene_post.hlsl`（`PSPathTrace`、`PSPathTraceApply`）。入力：`src/AetherGraphics.Native/ImGui/Overlay.cpp`（`HandleFreeCamera`）、`src/AetherGraphics.Managed/Diagnostics/FreeCamera.cs`
 
 - **フリーカメラ**：F11（`freeCameraHotkey`）で入り切り。ゲームの画面カメラを、描画の直前（ゲームのカメラのスクリプトの後）に Aether の位置・向き・画角で上書きする。入ったときはゲームのカメラの位置から始まる。
   - 操作：WASD か矢印キーで移動（視線の向き）、E / Space で上、Q / C で下、マウスで見回し、ホイールで画角（5〜120°）、R で画角を戻す、Shift で 5 倍、Ctrl で 1/5 の速さ。速さ `freeCameraSpeed`（m/s）、マウスの感度 `freeCameraSensitivity`（度 / カウント）。

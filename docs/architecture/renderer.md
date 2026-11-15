@@ -8,7 +8,7 @@ Aether のレンダラーの構造（コマンドリストの単位、レンダ�
 
 | 部品 | ファイル | 役割 |
 |---|---|---|
-| `Renderer` | `src/Aether.Native/Renderer/Renderer.{h,cpp}` | ホストのイベントごとにコマンドリストを 1 本記録して提出する。リストの再利用、完了マーカー、GPU タイムスタンプ、フレームキャプチャ、障害時の停止 |
+| `Renderer` | `src/AetherGraphics.Native/Renderer/Renderer.{h,cpp}` | ホストのイベントごとにコマンドリストを 1 本記録して提出する。リストの再利用、完了マーカー、GPU タイムスタンプ、フレームキャプチャ、障害時の停止 |
 | `SceneRenderer` | `Renderer/SceneRenderer.{h,cpp}` | シーンの 1 フレーム。描画リスト、カスケード、ライトのクラスター、フレーム定数を作り、パスをレンダーグラフに登録して実行する |
 | `RenderGraph` | `Renderer/RenderGraph.{h,cpp}` | パスとリソースの宣言、検証、一時テクスチャーの割り当て、状態遷移、実行 |
 | `GpuTimer` | `Renderer/GpuTimer.{h,cpp}` | シーンのパスごとの GPU 時間 |

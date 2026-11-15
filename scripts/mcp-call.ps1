@@ -16,8 +16,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $repo 'build\mcp\Release\Aether.MCP.exe'
-if (-not (Test-Path $exe)) { Write-Host 'Aether.MCP.exe not found: dotnet build src\Aether.MCP -c Release'; exit 1 }
+$exe = Join-Path $repo 'build\mcp\Release\AetherGraphics.MCP.exe'
+if (-not (Test-Path $exe)) { Write-Host 'AetherGraphics.MCP.exe not found: dotnet build src\AetherGraphics.MCP -c Release'; exit 1 }
 $json = '{}'
 if ($Arguments.Count -gt 0) {
 	if ($Arguments[0].TrimStart().StartsWith('{')) {

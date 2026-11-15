@@ -39,8 +39,8 @@ while (-not (Get-Game)) {
 Write-Host "game started (pid $((Get-Game).Id)); waiting for Aether's pipe"
 while ((Get-Date) -lt $deadline) {
 	if (-not (Get-Game)) { Write-Host 'the game exited'; exit 2 }
-	if (Test-Path '\\.\pipe\Aether.Runtime') { Write-Host 'Aether is listening'; exit 0 }
+	if (Test-Path '\\.\pipe\AetherGraphics.Runtime') { Write-Host 'Aether is listening'; exit 0 }
 	Start-Sleep -Milliseconds 500
 }
-Write-Host "Aether did not answer within $TimeoutSeconds s (see kino\output.log and kino\mods\Aether\logs\aether.jsonl)"
+Write-Host "Aether did not answer within $TimeoutSeconds s (see kino\output.log and kino\mods\AetherGraphics\logs\aether.jsonl)"
 exit 1

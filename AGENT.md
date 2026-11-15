@@ -1,4 +1,4 @@
-# AGENT.md — Aether で作業するエージェントへの指示
+# AGENT.md — Aether Graphics で作業するエージェントへの指示
 
 ## 1. 言語と報告
 
@@ -8,7 +8,12 @@
 
 ## 2. プロジェクトの前提
 
-- CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1、HDRP 16、64-bit）向けの Mod。ローダーは BepInEx 5 が既定（KSL 用の入口も残してある。`docs/development/build.md` の「ローダー」）。C# のコア（`AetherCore`）はローダーの型を参照しない。ローダーに求めるものは `IAetherHost` に足す。描画は HDRP に頼らない Aether 自身の DX12 レンダラーが行う。
+- **名前は Aether Graphics。** Aether シリーズの Mod のひとつ（0.3.0 までは Aether）。シリーズの Mod が増えても衝突しないように名前を付ける。
+  - プロジェクトとアセンブリは `AetherGraphics.*`（`AetherGraphics.dll`、`AetherGraphicsNative.dll`、`AetherGraphics.MCP.exe`）。
+  - C# の名前空間は `AetherGraphics`（`Aether.Graphics` にしない：Unity の `Graphics` クラスが名前空間に隠れる）。
+  - BepInEx の ID は `nec093.aether.graphics`、パイプは `\\.\pipe\AetherGraphics.Runtime`、配置先と設定は `AetherGraphics` のフォルダー。
+  - C++ の名前空間 `aether`、C API の `Aether_*`、`AetherCore` などの型名は Mod の内部の名前として残している。
+- CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1、HDRP 16、64-bit）向けの Mod。ローダーは BepInEx 5 が既定（KSL 用の入口も残してある。`docs/development/build.md` の「ローダー」）。kino には依存しない。KSL 1.0.14 は BepInEx を消し、ホワイトリストに無い BepInEx の Mod を BAN するので、この環境では KSL を無効にしている（`winhttp.dll.aether-off`）。C# のコア（`AetherCore`）はローダーの型を参照しない。ローダーに求めるものは `IAetherHost` に足す。描画は HDRP に頼らない Aether 自身の DX12 レンダラーが行う。
 - **DirectX 12 のみ。** DX11 / Vulkan のバックエンド、フォールバック、複数 API 向けの抽象化は作らない。機能の有無は GPU ごとに実行時判定し、無い機能だけを切る。
 - NVIDIA / AMD / Intel の共通経路を基本にする。ベンダー固有機能はオプション。
 - Unity のゲームロジック、物理、シーン管理、入力は維持する。Aether が受け持つのは描画と計測・診断。
@@ -35,10 +40,10 @@
 | 対象 | コマンド |
 |---|---|
 | ネイティブ | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-native.ps1` |
-| MCP サーバー | `dotnet build src\Aether.MCP\Aether.MCP.csproj -c Release` |
-| C# Mod（BepInEx 用） | `dotnet build src\Aether.Managed\Aether.Managed.csproj -c Release -p:Loader=BepInEx "-p:GameDir=<ゲームのフォルダー>"`（**`-p:Loader=BepInEx` が無いと別の出力先に出て、`deploy.ps1` が配置するものは更新されない**） |
-| C# Mod（KSL 用、署名つき `.ksm` を `kino\mods` へ） | `dotnet build src\Aether.Managed\Aether.Managed.csproj -c Release -p:Loader=Ksl` |
-| C# のコアだけのコンパイル確認 | `dotnet build src\Aether.Managed\Aether.Managed.csproj -c Debug -p:Loader=None` |
+| MCP サーバー | `dotnet build src\AetherGraphics.MCP\AetherGraphics.MCP.csproj -c Release` |
+| C# Mod（BepInEx 用） | `dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Release -p:Loader=BepInEx "-p:GameDir=<ゲームのフォルダー>"`（**`-p:Loader=BepInEx` が無いと別の出力先に出て、`deploy.ps1` が配置するものは更新されない**） |
+| C# Mod（KSL 用、署名つき `.ksm` を `kino\mods` へ） | `dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Release -p:Loader=Ksl` |
+| C# のコアだけのコンパイル確認 | `dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Debug -p:Loader=None` |
 | HDRP の DX12 用バンドル | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-hdrp-bundle.ps1`（長い。バックグラウンドで実行する） |
 | 配置（ゲームを閉じて） | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1`（既定 `-Loader BepInEx`。`-Build` でビルドから） |
 | 放置テスト（安定性の実験） | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\soak-test.ps1 -Name <名前> -Mode hdrp|aether|compare -Reps 3` |
@@ -70,9 +75,9 @@
 - 解放は GPU が終わったと確認できてから。確認できなければ解放しない。
 - グローバルなフック（Present、D3D12、DXGI）を入れない。
 - メインスレッドと IPC のスレッドは描画スレッドを待たせない。
-- C API（`src/Aether.Native/include/AetherApi.h`）を変えたら `AETHER_API_VERSION` と `Native.ApiVersion` を一緒に上げ、`.ksm` と DLL を同時に配置する。
+- C API（`src/AetherGraphics.Native/include/AetherApi.h`）を変えたら `AETHER_API_VERSION` と `Native.ApiVersion` を一緒に上げ、`.ksm` と DLL を同時に配置する。
 - 設定を足すときは `Core/Config.cpp` の 1 か所（値、スキーマ、検証）に足す。オーバーレイと MCP は同じ入口を使う。
-- MCP のツールを足すときは、`Ipc/Api.cpp`、`src/Aether.MCP/Tools/ToolCatalog.cs`（入力・出力スキーマ）、`docs/diagnostics/mcp-api.md`、`scripts/test-mcp.ps1` をそろえる。
+- MCP のツールを足すときは、`Ipc/Api.cpp`、`src/AetherGraphics.MCP/Tools/ToolCatalog.cs`（入力・出力スキーマ）、`docs/diagnostics/mcp-api.md`、`scripts/test-mcp.ps1` をそろえる。
 - 文書はコードと一致させる。変更したら該当の文書も直す。
 
 ## 6. この環境で分かっていること（すべてこのプロジェクトで確認）
@@ -84,8 +89,8 @@
 - 安定性の実験は結果が確率的。1 条件 3 回未満で「安定」と判断しない。
 - KSL は生の `.dll` の Mod を読み込まない。署名済みの `.ksm` が必要。
 - maykr の署名は KSL のサーバーに問い合わせる。続けて要求すると `Build request denied` になることがある（待って再実行）。不要な Release ビルドを繰り返さない。
-- KSL は `kino\mods\<フォルダー>\` 直下の `.dll` をすべて Mod 候補として調べる。ネイティブ DLL は `kino\mods\Aether\native\` に置く。
-- `IUnityInterfaces` は Unity のプラグインローダー経由（`<Game>_Data\Plugins\x86_64\`）でしか受け取れない前提で実装している。`LoadLibrary` だけで `UnityPluginLoad` が呼ばれるかは未確認（`kino\config\Aether\dev-preload` で試せる）。
+- KSL は `kino\mods\<フォルダー>\` 直下の `.dll` をすべて Mod 候補として調べる。ネイティブ DLL は `kino\mods\AetherGraphics\native\` に置く。
+- `IUnityInterfaces` は Unity のプラグインローダー経由（`<Game>_Data\Plugins\x86_64\`）でしか受け取れない前提で実装している。`LoadLibrary` だけで `UnityPluginLoad` が呼ばれるかは未確認（`kino\config\AetherGraphics\dev-preload` で試せる）。
 - **DX12 では、ゲームの HDRP は単体では構築できない**（`Kernel 'KDepthDownsample8DualUav' not found`。HDRP のコンピュートシェーダーに DX12 のカーネルが無い）。`HdrpDx12Fix` とバンドルで補う。
 - HDRP が動くようになった後、ゲーム独自の HDRP カスタムパス 2 つ（`GpuCulling.GpuCullingPass`、`ParticleRenderPass`）も DX12 のカーネルが無く、毎フレーム例外でフレームの残りを止める。`GameDx12Workarounds` が無効化する（ソースが無いので作り直せない）。
 - HDRP のバンドルを作るとき、HDRP のビルド時ストリッパーは HDRP アセットが無いと全カーネルを除去する。バリアントは全組み合わせを作らない（`Deferred` だけで 6,696、36 並列で 35 分以上）。ゲームの設定（`unity/hdrp-game-settings.json`）の組み合わせだけをビルドする（518 バリアント、数分）。
@@ -119,11 +124,11 @@
 | もの | 場所 |
 |---|---|
 | ログ（KSL） | `<ゲーム>\kino\output.log` |
-| ログ（Aether） | `<ゲーム>\BepInEx\plugins\Aether\logs\aether.jsonl`（KSL のときは `kino\mods\Aether\logs\`） |
+| ログ（Aether） | `<ゲーム>\BepInEx\plugins\AetherGraphics\logs\aether.jsonl`（KSL のときは `kino\mods\AetherGraphics\logs\`） |
 | ログ（BepInEx） | `<ゲーム>\BepInEx\LogOutput.log` |
 | ログ（Unity） | `%USERPROFILE%\AppData\LocalLow\CarX Technologies\Drift Racing Online\Player.log` |
-| キャプチャ、ベンチマーク | `<ゲーム>\BepInEx\plugins\Aether\captures\`、`benchmarks\` |
-| 設定 | `<ゲーム>\BepInEx\config\Aether\aether.json`（KSL のときは `kino\config\Aether\`） |
+| キャプチャ、ベンチマーク | `<ゲーム>\BepInEx\plugins\AetherGraphics\captures\`、`benchmarks\` |
+| 設定 | `<ゲーム>\BepInEx\config\AetherGraphics\aether.json`（KSL のときは `kino\config\AetherGraphics\`） |
 | Unity のビルド用プロジェクト | `%USERPROFILE%\Aether-Unity`（ログは `Logs\aether_build.log`） |
-| 開発用のファイル（`dev-camera.txt`、`dev-smoke.txt`） | `<ゲーム>\BepInEx\config\Aether\` |
+| 開発用のファイル（`dev-camera.txt`、`dev-smoke.txt`） | `<ゲーム>\BepInEx\config\AetherGraphics\` |
 | Unity Native Plugin API のヘッダー | `C:\Program Files\Unity\Hub\Editor\2023.2.20f1\Editor\Data\PluginAPI` |

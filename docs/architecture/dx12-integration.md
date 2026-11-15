@@ -1,7 +1,7 @@
 # DX12 統合
 
 Aether がゲームの D3D12 デバイスとキューの上でどう動くか、守っている規則、完了とリソースの寿命の判定、ゲーム側を DX12 で動かすための対処をまとめます。
-実装は `src/Aether.Native/Device/UnityBridge.cpp`、`Renderer/Renderer.cpp`、`Session.cpp`、`src/Aether.Managed/`。
+実装は `src/AetherGraphics.Native/Device/UnityBridge.cpp`、`Renderer/Renderer.cpp`、`Session.cpp`、`src/AetherGraphics.Managed/`。
 
 ## Unity の D3D12 デバイスを使う
 
@@ -24,8 +24,8 @@ Unity のレンダラーが D3D12 でなければ `E_NOT_D3D12` を記録して�
 ### Unity にプラグインとして読み込ませる
 
 `IUnityInterfaces` は、Unity が自分のプラグインローダーで DLL を読み込んだときに呼ぶ `UnityPluginLoad` でしか受け取れない、という前提で実装しています。
-そのため `AetherNative.dll` は Unity のプラグインフォルダー（`<Game>_Data\Plugins\x86_64\`）に置き、C# 側の最初の P/Invoke（`Aether_GetApiVersion`）で Unity に読み込ませます。
-Mod は起動時、最初の P/Invoke の前に、データフォルダーの `native\AetherNative.dll` をそこへコピーします（無いとき、サイズか更新時刻が違うとき。`Native.Prepare`）。
+そのため `AetherGraphicsNative.dll` は Unity のプラグインフォルダー（`<Game>_Data\Plugins\x86_64\`）に置き、C# 側の最初の P/Invoke（`Aether_GetApiVersion`）で Unity に読み込ませます。
+Mod は起動時、最初の P/Invoke の前に、データフォルダーの `native\AetherGraphicsNative.dll` をそこへコピーします（無いとき、サイズか更新時刻が違うとき。`Native.Prepare`）。
 
 開発用のスイッチ：設定フォルダーに `dev-preload` というファイルを置くと、コピーせずに `native\` から `LoadLibrary` で読み込みます。この読み込み方で `UnityPluginLoad` が呼ばれることは前提にしていません。
 
@@ -45,7 +45,7 @@ C# 側は `Aether_GetRenderEventFunc` の関数を、4 つのイベント番号�
 ### フレームの流れ
 
 ```
-メインスレッド（C#）                                   Unity の描画スレッド（AetherNative）
+メインスレッド（C#）                                   Unity の描画スレッド（AetherGraphicsNative）
 Update:
   IssuePluginEvent(FRAME_BEGIN) ──────────────────▶ GPU タイムスタンプ 1 個のリストを提出
 AetherPipeline.Render（renderMode aether）

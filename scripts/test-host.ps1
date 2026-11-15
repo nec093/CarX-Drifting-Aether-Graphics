@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $repo "build\native\$Config\AetherHost.exe"
 if (-not (Test-Path $exe)) { Write-Host "AetherHost.exe not found: run scripts\build-native.ps1 first"; exit 1 }
-$env:AETHER_PIPE_NAME = "Aether.Test.$PID" # not the game's pipe
+$env:AETHER_GRAPHICS_PIPE_NAME = "Aether.Test.$PID" # not the game's pipe
 $script:failed = 0
 
 function New-Data([string]$name) {

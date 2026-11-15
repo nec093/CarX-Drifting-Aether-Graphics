@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $hostExe = Join-Path $repo "build\native\$Config\AetherHost.exe"
-$mcpExe = Join-Path $repo 'build\mcp\Release\Aether.MCP.exe'
+$mcpExe = Join-Path $repo 'build\mcp\Release\AetherGraphics.MCP.exe'
 foreach ($f in $hostExe, $mcpExe) { if (-not (Test-Path $f)) { Write-Host "missing $f (build first)"; exit 1 } }
 
 $data = Join-Path $env:TEMP "aether-mcp-test-$PID"
@@ -20,7 +20,7 @@ Remove-Item -Recurse -Force $data -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force (Join-Path $data 'shaders'), (Join-Path $data 'config') | Out-Null
 Copy-Item (Join-Path $repo 'shaders\*') (Join-Path $data 'shaders')
 $pipe = "Aether.Test.$PID"
-$env:AETHER_PIPE_NAME = $pipe
+$env:AETHER_GRAPHICS_PIPE_NAME = $pipe
 $script:failed = 0
 $script:nextId = 1
 
@@ -74,7 +74,7 @@ try {
 	$hostProc = Start-AetherHost 'allow' 40
 	$mcp = Start-Mcp @('--allow-control')
 	$init = Send $mcp 'initialize' @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'test'; version = '0' } }
-	Check 'initialize' ($init.result.serverInfo.name -eq 'aether' -and $init.result.protocolVersion -eq '2025-06-18')
+	Check 'initialize' ($init.result.serverInfo.name -eq 'aether-graphics' -and $init.result.protocolVersion -eq '2025-06-18')
 	$tools = (Send $mcp 'tools/list' $null).result.tools
 	Check "tools/list ($($tools.Count) tools, each with input and output schema)" ($tools.Count -eq 21 -and @($tools | Where-Object { -not $_.inputSchema -or -not $_.outputSchema }).Count -eq 0)
 

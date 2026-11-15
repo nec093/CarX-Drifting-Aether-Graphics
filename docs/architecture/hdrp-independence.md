@@ -1,6 +1,6 @@
 # ゲームのレンダーパイプラインを置き換える
 
-描画モード `aether`（既定）では、ゲームのレンダーパイプライン（HDRP）は存在しない。Aether は最初のフレームより前に、自分のパイプラインアセット（`AetherPipelineAsset`、`src/Aether.Managed/Pipeline/AetherPipeline.cs`）をゲームのものと入れ替える。Unity は `HDRenderPipeline` を作らないので、HDRP のレンダーターゲット、バッファー、シェーダーバリアントは確保されない。
+描画モード `aether`（既定）では、ゲームのレンダーパイプライン（HDRP）は存在しない。Aether は最初のフレームより前に、自分のパイプラインアセット（`AetherPipelineAsset`、`src/AetherGraphics.Managed/Pipeline/AetherPipeline.cs`）をゲームのものと入れ替える。Unity は `HDRenderPipeline` を作らないので、HDRP のレンダーターゲット、バッファー、シェーダーバリアントは確保されない。
 
 ## 入れ替えの仕組み（`PipelineSwitch`）
 
@@ -66,7 +66,7 @@
 
 ## 品質設定（`HostQualitySettings`）
 
-`src/Aether.Managed/GameIntegration/HostQualitySettings.cs`。Aether の設定（F10 のオーバーレイ）の値で Unity の品質設定を上書きする。ゲームのグラフィックメニューの値は使わない。
+`src/AetherGraphics.Managed/GameIntegration/HostQualitySettings.cs`。Aether の設定（F10 のオーバーレイ）の値で Unity の品質設定を上書きする。ゲームのグラフィックメニューの値は使わない。
 
 | Aether の設定 | Unity の値 | 範囲（既定） |
 |---|---|---|

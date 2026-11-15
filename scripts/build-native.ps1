@@ -1,8 +1,8 @@
-# Configures and builds the native runtime (AetherNative.dll) and the test host (AetherHost.exe).
+# Configures and builds the native runtime (AetherGraphicsNative.dll) and the test host (AetherHost.exe).
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-native.ps1 [-Config RelWithDebInfo] [-Clean] [-UnityPluginApi <dir>]
 #
-# Output: build\native\<Config>\AetherNative.dll, AetherHost.exe. Needs Visual Studio's C++ tools, CMake and the Unity
+# Output: build\native\<Config>\AetherGraphicsNative.dll, AetherHost.exe. Needs Visual Studio's C++ tools, CMake and the Unity
 # editor's PluginAPI headers (default: the 2023.2.20f1 editor from Unity Hub; override with -UnityPluginApi or AETHER_UNITY_PLUGIN_API).
 # Exit code 0 on success; on failure the compiler's errors are printed and the exit code is 1.
 param(
@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $env:VSLANG = '1033' # English compiler messages
 $repo = Split-Path -Parent $PSScriptRoot
-$source = Join-Path $repo 'src\Aether.Native'
+$source = Join-Path $repo 'src\AetherGraphics.Native'
 $build = Join-Path $repo 'build\native'
 $cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
 if (-not $cmake) { $cmake = 'C:\Program Files\CMake\bin\cmake.exe' }
@@ -44,6 +44,6 @@ if ($code -ne 0) {
 	exit 1
 }
 $warnings = @(Select-String -Path $log -Encoding Default -Pattern 'warning C\d+' | Where-Object { $_.Line -notmatch 'third_party' } | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique)
-Write-Host "BUILD OK ($Config): $build\$Config\AetherNative.dll, AetherHost.exe; $($warnings.Count) warning(s) in Aether's code"
+Write-Host "BUILD OK ($Config): $build\$Config\AetherGraphicsNative.dll, AetherHost.exe; $($warnings.Count) warning(s) in Aether's code"
 $warnings | Select-Object -First 15 | ForEach-Object { Write-Host "  $_" }
 exit 0

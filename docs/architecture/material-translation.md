@@ -1,6 +1,6 @@
 # マテリアルの変換
 
-`src/Aether.Managed/SceneCapture/MaterialTranslator.cs` は、Unity のマテリアルを Aether 自身のマテリアル `AeMaterialDesc`（[scene-data-contract.md](scene-data-contract.md)）に変える。HDRP のマテリアルの評価、キーワード、パスは使わない。シェーダーが実際に持つプロパティを読み、Aether の前方シェーダー（`shaders/scene_forward.hlsl`）が扱う少数のクラスに当てはめる。
+`src/AetherGraphics.Managed/SceneCapture/MaterialTranslator.cs` は、Unity のマテリアルを Aether 自身のマテリアル `AeMaterialDesc`（[scene-data-contract.md](scene-data-contract.md)）に変える。HDRP のマテリアルの評価、キーワード、パスは使わない。シェーダーが実際に持つプロパティを読み、Aether の前方シェーダー（`shaders/scene_forward.hlsl`）が扱う少数のクラスに当てはめる。
 
 ここで扱うのは「何を読み、どこに入れるか」まで。各クラスの陰影（塗装、クローム、ランプなど）は [rendering-features.md](rendering-features.md) にある。
 

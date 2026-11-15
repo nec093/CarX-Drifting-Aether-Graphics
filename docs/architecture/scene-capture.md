@@ -1,6 +1,6 @@
 # シーンキャプチャ
 
-`src/Aether.Managed/SceneCapture/SceneCapture.cs` は、Unity のシーンを読み取り、Scene Data Contract（[scene-data-contract.md](scene-data-contract.md)）の呼び出しに変えてネイティブ側へ渡す。シーンの物は何も書き換えない。
+`src/AetherGraphics.Managed/SceneCapture/SceneCapture.cs` は、Unity のシーンを読み取り、Scene Data Contract（[scene-data-contract.md](scene-data-contract.md)）の呼び出しに変えてネイティブ側へ渡す。シーンの物は何も書き換えない。
 
 関係するファイル：
 

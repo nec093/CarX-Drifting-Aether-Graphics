@@ -6,8 +6,8 @@
 
 | 場所 | 内容 |
 |---|---|
-| `BepInEx\LogOutput.log`（KSL：`kino\output.log`） | ローダーのログ。Aether が読み込まれたか、C# 側の `[Aether]` の行 |
-| `BepInEx\plugins\Aether\logs\aether.jsonl`（KSL：`kino\mods\Aether\logs\`） | Aether の構造化ログ（1 行 1 JSON）。前回分は `aether.prev.jsonl` |
+| `BepInEx\LogOutput.log`（KSL：`kino\output.log`） | ローダーのログ。Aether が読み込まれたか、C# 側の `[Aether Graphics]` の行 |
+| `BepInEx\plugins\AetherGraphics\logs\aether.jsonl`（KSL：`kino\mods\AetherGraphics\logs\`） | Aether の構造化ログ（1 行 1 JSON）。前回分は `aether.prev.jsonl` |
 | 同じフォルダーの `crash-current.json` / `crash-previous.json` | Aether が検出した障害のレポート |
 | `%USERPROFILE%\AppData\LocalLow\CarX Technologies\Drift Racing Online\Player.log` | Unity のログ（例外、グラフィックス API） |
 | `%LOCALAPPDATA%\Temp\CarX Technologies\Drift Racing Online\Crashes\` | Unity のクラッシュダンプ。例外コード `0x87D` は、D3D12 デバッグレイヤーが破損を検出して投げた例外 |
@@ -23,11 +23,11 @@ D3D12 デバッグレイヤーのメッセージは `Player.log` には出ませ
 |---|---|
 | `BepInEx\LogOutput.log` が無い、Aether が出てこない | BepInEx が入っていない、またはプロキシ DLL の名前が違う。プロキシは `version.dll` という名前で置く（`winhttp.dll` は KSL 本体なので上書きしない）。Aether の配置は `scripts\deploy.ps1`（[build.md](../development/build.md)） |
 | KSL が Aether を `BannedMod` として読み込まない | この環境の KSL の扱い。回避はしない。BepInEx で読み込む |
-| `kino\output.log` に `you don't have permissions to load KSL .dll mods` | KSL で、生の `.dll` を読めないアカウント。署名済みの `Aether.ksm` が要る（`-p:Loader=Ksl` の Release ビルド、キーと `maykr.exe`） |
+| `kino\output.log` に `you don't have permissions to load KSL .dll mods` | KSL で、生の `.dll` を読めないアカウント。署名済みの `AetherGraphics.ksm` が要る（`-p:Loader=Ksl` の Release ビルド、キーと `maykr.exe`） |
 | `[Aether] Aether needs DirectX 12 ...` | DX11 で起動している。Steam の起動オプションに `-force-d3d12`、または `scripts\launch-game.ps1` |
-| `[Aether] native runtime not available: missing ...AetherNative.dll` | Aether のフォルダーの `native\AetherNative.dll` が無い。ゲームを閉じて `scripts\deploy.ps1` |
-| `AetherNative.dll has API version ...` | `Aether.dll` とネイティブ DLL の版が合っていない。両方を同じビルドから配置する（ゲームを閉じて `scripts\deploy.ps1`） |
-| `Unity did not call UnityPluginLoad on AetherNative.dll` | Unity のプラグインとして読み込まれなかった。`<Game>_Data\Plugins\x86_64\AetherNative.dll` があるか、設定フォルダーに `dev-preload` を置いたままにしていないか。この状態でもログと MCP は使える |
+| `[Aether] native runtime not available: missing ...AetherGraphicsNative.dll` | Aether のフォルダーの `native\AetherGraphicsNative.dll` が無い。ゲームを閉じて `scripts\deploy.ps1` |
+| `AetherGraphicsNative.dll has API version ...` | `AetherGraphics.dll` とネイティブ DLL の版が合っていない。両方を同じビルドから配置する（ゲームを閉じて `scripts\deploy.ps1`） |
+| `Unity did not call UnityPluginLoad on AetherGraphicsNative.dll` | Unity のプラグインとして読み込まれなかった。`<Game>_Data\Plugins\x86_64\AetherGraphicsNative.dll` があるか、設定フォルダーに `dev-preload` を置いたままにしていないか。この状態でもログと MCP は使える |
 | 起動時に「The previous session did not shut down cleanly」と出る | 前回、Aether の終了処理が走らなかった（ゲームのクラッシュ、強制終了）。`get_crash_report` に前回のレポートとログの末尾が入っている |
 
 ### 画面
@@ -52,7 +52,7 @@ D3D12 デバッグレイヤーのメッセージは `Player.log` には出ませ
 
 ## DX12 で Aether が止めているゲームの機能
 
-DX12 でそのままでは壊れるゲームの機能を、Aether が止めています。設定フォルダー（BepInEx なら `BepInEx\config\Aether\`）にファイルを置くと動作を変えられます。
+DX12 でそのままでは壊れるゲームの機能を、Aether が止めています。設定フォルダー（BepInEx なら `BepInEx\config\AetherGraphics\`）にファイルを置くと動作を変えられます。
 
 | 対象 | 既定の動作 | 変えるファイル | 状態の表示 |
 |---|---|---|---|
@@ -69,7 +69,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Remove  
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Remove -Loader Ksl # KSL
 ```
 
-ゲームを閉じてから実行します。そのローダーの Aether のフォルダー（BepInEx：`BepInEx\plugins\Aether\`、KSL：`kino\mods\Aether\` と `kino\mods\Aether.ksm` / `Aether.dll`）と、`<Game>_Data\Plugins\x86_64\AetherNative.dll` を消します。
+ゲームを閉じてから実行します。そのローダーの Aether のフォルダー（BepInEx：`BepInEx\plugins\AetherGraphics\`、KSL：`kino\mods\AetherGraphics\` と `kino\mods\AetherGraphics.ksm` / `AetherGraphics.dll`）と、`<Game>_Data\Plugins\x86_64\AetherGraphicsNative.dll` を消します。
 設定フォルダーは残ります。BepInEx 自体も残ります。
 
 ## ほかの Mod との関係
@@ -78,5 +78,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Remove -
 - オーバーレイがマウス / キーボードを使っている間は、ゲームの入力（Rewired のマウスとキーボードのコントローラー）を無効にします。閉じると戻します。
 - `aether` モードでは Aether がゲームのレンダーパイプラインになり、ゲームの HDRP のパイプラインは作られません。HDRP に頼る Mod の動作は `hdrp` モードと比べて切り分けます。
 - HDRP の DX12 修正は、HDRP のランタイムリソースのコンピュートシェーダーを差し替えます。同じものを差し替える別の Mod と一緒に使うときは、設定フォルダーに `no-hdrp-fix` を置いて Aether 側を切れます。
-- BepInEx と KSL は共存できます。`deploy.ps1`（BepInEx）は KSL 側に残った Aether を消して、二重に起動しないようにします。
+- BepInEx と KSL（1.0.14）は共存できません。KSL は起動時に `BepInEx\` フォルダーを消し、ホワイトリストに無い BepInEx の Mod を BAN します（[build.md](../development/build.md) の「BepInEx の導入」）。`deploy.ps1`（BepInEx）は KSL 側に残った Aether Graphics を消して、二重に起動しないようにします。
 - KSL のときは、`get_status` の `managed.mods` に KSL が読み込んでいる Mod の一覧が出ます（BepInEx のときは空）。

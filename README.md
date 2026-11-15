@@ -1,11 +1,11 @@
-# Aether
+# Aether Graphics
 
-CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1）向けのグラフィックオーバーホール Mod です。
-ゲームのレンダラー（HDRP）を使わず、Aether 自身の DirectX 12 レンダラーでゲームを描画します。
+CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1）向けのグラフィックオーバーホール Mod です。Aether シリーズの Mod のひとつです（0.3.0 までの名前は Aether）。
+ゲームのレンダラー（HDRP）を使わず、Aether Graphics 自身の DirectX 12 レンダラーでゲームを描画します。以下の文書では Aether と略すことがあります。
 
 - 描画 API は **DirectX 12 のみ**（DX11 / Vulkan のバックエンドもフォールバックもありません）。
 - NVIDIA / AMD / Intel 共通の経路を基本とし、ベンダー固有機能は実行時判定のオプションにします。
-- Mod ローダーは BepInEx 5（KSL 用の入口もあります）。ゲーム内 GUI は Dear ImGui。AI エージェントとは MCP で連携します。
+- Mod ローダーは BepInEx 5 です（KSL 用の入口もあります）。kino には依存しません。ゲーム内 GUI は Dear ImGui。AI エージェントとは MCP で連携します。
 - ゲームのロジック、物理、シーン管理、入力はそのままです。Aether が受け持つのは描画と計測・診断です。
 
 ## できること
@@ -28,13 +28,13 @@ CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1）向けの
 ## 構成
 
 ```
-src/Aether.Managed/   C# の Mod（net472）
+src/AetherGraphics.Managed/   C# の Mod（net472）
   Loaders/            BepInEx / KSL の入口
   Pipeline/           Unity のレンダーパイプライン（AetherPipeline）
   SceneCapture/       シーンの読み取り（メッシュ、マテリアル、ライト、パーティクル、タイヤスモーク）
   GameIntegration/    ゲーム固有の対応（DX12 の回避策、品質設定、昼夜）
   Diagnostics/        開発用の補助
-src/Aether.Native/    ネイティブランタイム（C++20, D3D12）。AetherNative.dll とテストホスト AetherHost.exe
+src/AetherGraphics.Native/    ネイティブランタイム（C++20, D3D12）。AetherGraphicsNative.dll とテストホスト AetherHost.exe
   Device/             Unity との境界（UnityBridge）、ホストの抽象（Host.h）、GPU 情報
   Renderer/           フレーム、シーンレンダラー、レンダーグラフ、BVH、煙の運動、GPU タイムスタンプ
   Scene/              シーンデータの保管
@@ -44,7 +44,7 @@ src/Aether.Native/    ネイティブランタイム（C++20, D3D12）。AetherN
   ImGui/              オーバーレイ
   Ipc/                名前付きパイプと API
   Core/               設定、ログ、共通
-src/Aether.MCP/       MCP サーバー（C#, net10、stdio ⇔ 名前付きパイプ）
+src/AetherGraphics.MCP/       MCP サーバー（C#, net10、stdio ⇔ 名前付きパイプ）
 shaders/              HLSL
 unity/                HDRP の DX12 用コンピュートシェーダーのバンドルを作るエディタースクリプト（参照用の hdrp モード向け）
 scripts/              ビルド、配置、起動、テスト
@@ -58,9 +58,9 @@ docs/                 設計と手順
 手順の詳細は [docs/development/build.md](docs/development/build.md)。
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-native.ps1     # AetherNative.dll, AetherHost.exe
-dotnet build src\Aether.MCP\Aether.MCP.csproj -c Release                         # MCP サーバー
-dotnet build src\Aether.Managed\Aether.Managed.csproj -c Release -p:Loader=BepInEx "-p:GameDir=<ゲームのフォルダー>"   # C# の Mod
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-native.ps1     # AetherGraphicsNative.dll, AetherHost.exe
+dotnet build src\AetherGraphics.MCP\AetherGraphics.MCP.csproj -c Release                         # MCP サーバー
+dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Release -p:Loader=BepInEx "-p:GameDir=<ゲームのフォルダー>"   # C# の Mod
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1           # ゲームへ配置（ゲームを閉じて）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch-game.ps1      # Steam 経由で -force-d3d12 起動
 ```
@@ -68,18 +68,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch-game.ps1     
 - ゲームは **`-force-d3d12`** で起動します（Steam の起動オプション、または `scripts\launch-game.ps1`）。DX11 で起動した場合、Aether は何もせずその旨をログに出します。
 - **F10** でオーバーレイを開閉します。
 - **F11** でフリーカメラに入ります（UI を隠す。WASD で移動、マウスで見回し、ホイールで画角。その間はパストレーシング）。
-- ログ・キャプチャ・ベンチマーク結果は `<ゲーム>\BepInEx\plugins\Aether\`（`logs\aether.jsonl`、`captures\`、`benchmarks\`）、設定は `<ゲーム>\BepInEx\config\Aether\aether.json`。
+- ログ・キャプチャ・ベンチマーク結果は `<ゲーム>\BepInEx\plugins\AetherGraphics\`（`logs\aether.jsonl`、`captures\`、`benchmarks\`）、設定は `<ゲーム>\BepInEx\config\AetherGraphics\aether.json`。
 
 ## AI 連携（MCP）
 
-`build\mcp\Release\Aether.MCP.exe` が MCP サーバーです。ツールの一覧とスキーマは [docs/diagnostics/mcp-api.md](docs/diagnostics/mcp-api.md)。
+`build\mcp\Release\AetherGraphics.MCP.exe` が MCP サーバーです。ツールの一覧とスキーマは [docs/diagnostics/mcp-api.md](docs/diagnostics/mcp-api.md)。
 
 ```json
-{ "mcpServers": { "aether": { "command": "C:\\path\\to\\build\\mcp\\Release\\Aether.MCP.exe", "args": [] } } }
+{ "mcpServers": { "aether-graphics": { "command": "C:\\path\\to\\build\\mcp\\Release\\AetherGraphics.MCP.exe", "args": [] } } }
 ```
 
 - 既定は読み取り専用です。設定変更・キャプチャ・ベンチマークなどの操作ツールは `--allow-control` を付けたときだけ提供され、さらにゲーム側の設定 `mcpControl`（`deny` / `ask` / `allow`、既定 `ask`）に従います。`ask` ではゲーム内に承認ダイアログが出ます。
-- 通信はこの PC の同じユーザーからだけ届く名前付きパイプ（`\\.\pipe\Aether.Runtime`）です。AI は GPU デバイスやリソースの寿命に触れられません。
+- 通信はこの PC の同じユーザーからだけ届く名前付きパイプ（`\\.\pipe\AetherGraphics.Runtime`）です。AI は GPU デバイスやリソースの寿命に触れられません。
 
 ## 文書
 
@@ -102,4 +102,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch-game.ps1     
 ## 第三者のソフトウェア
 
 Dear ImGui（MIT）、nlohmann/json（MIT）、Intel XeGTAO（MIT）を `third_party/` に同梱しています。Unity Native Plugin API のヘッダー（Unity Companion License）はリポジトリに含めず、Unity エディターのものを参照します。
-Aether は非公式の Mod であり、CarX Technologies、Unity Technologies が作成・支援・推奨しているものではありません。
+Aether Graphics は非公式の Mod であり、CarX Technologies、Unity Technologies が作成・支援・推奨しているものではありません。

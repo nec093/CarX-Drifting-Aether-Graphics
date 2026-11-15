@@ -1,5 +1,5 @@
 // Aether scene shaders: shared declarations (Shader Model 5.1 baseline, no optional features).
-// Layouts mirror src/Aether.Native/Renderer/SceneRenderer.cpp (FrameConstants, InstanceData, MaterialData, LightData).
+// Layouts mirror src/AetherGraphics.Native/Renderer/SceneRenderer.cpp (FrameConstants, InstanceData, MaterialData, LightData).
 // Conventions: docs/architecture/scene-data-contract.md (Unity world space, column vectors: mul(M, v), reversed Z).
 #ifndef AETHER_SCENE_HLSLI
 #define AETHER_SCENE_HLSLI

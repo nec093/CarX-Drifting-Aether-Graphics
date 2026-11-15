@@ -5,7 +5,7 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-deps.ps1
 #
-# NRD's shaders are compiled with the Windows SDK's DXC (src\Aether.Native\CMakeLists.txt): nothing else is downloaded.
+# NRD's shaders are compiled with the Windows SDK's DXC (src\AetherGraphics.Native\CMakeLists.txt): nothing else is downloaded.
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $deps = Join-Path $repo 'build\deps'

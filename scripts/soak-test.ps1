@@ -4,7 +4,7 @@
 #       [-NoDebugLayer] [-Triangle 1] [-GpuTiming 1] [-Dev '{"directSubmit":true}'] [-Out results.jsonl]
 #
 # -Mode / -Triangle / -GpuTiming are written into aether.json before each run; -Dev becomes
-# dev-options.json in Aether's config folder (experiment switches, src/Aether.Native/Core/DevOptions.h; "statsSeconds" is added).
+# dev-options.json in Aether's config folder (experiment switches, src/AetherGraphics.Native/Core/DevOptions.h; "statsSeconds" is added).
 # One JSON line per run is appended to -Out (default: benchmarks\soak-results.jsonl in Aether's data folder).
 # Afterwards dev-options.json is removed and aether.json is put back to renderMode hdrp.
 param(
@@ -22,9 +22,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 # where Aether lives depends on the loader it was deployed for (scripts\deploy.ps1)
-$bepinex = Test-Path (Join-Path $GameDir 'BepInEx\plugins\Aether\Aether.dll')
-$dataDir = if ($bepinex) { Join-Path $GameDir 'BepInEx\plugins\Aether' } else { Join-Path $GameDir 'kino\mods\Aether' }
-$configDir = if ($bepinex) { Join-Path $GameDir 'BepInEx\config\Aether' } else { Join-Path $GameDir 'kino\config\Aether' }
+$bepinex = Test-Path (Join-Path $GameDir 'BepInEx\plugins\AetherGraphics\AetherGraphics.dll')
+$dataDir = if ($bepinex) { Join-Path $GameDir 'BepInEx\plugins\AetherGraphics' } else { Join-Path $GameDir 'kino\mods\AetherGraphics' }
+$configDir = if ($bepinex) { Join-Path $GameDir 'BepInEx\config\AetherGraphics' } else { Join-Path $GameDir 'kino\config\AetherGraphics' }
 $cfg = Join-Path $configDir 'aether.json'
 $devFile = Join-Path $configDir 'dev-options.json'
 $log = Join-Path $dataDir 'logs\aether.jsonl'

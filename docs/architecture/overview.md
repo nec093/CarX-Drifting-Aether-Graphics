@@ -5,13 +5,13 @@
 ```
 CarX Drift Racing Online（Unity 2023.2、-force-d3d12）
       │
-   Mod ローダー（BepInEx か KSL）── Aether.Managed（C#、src/Aether.Managed）
-      │                              ・AetherNative.dll を Unity のプラグインとして読み込ませる
+   Mod ローダー（BepInEx か KSL）── AetherGraphics.Managed（C#、src/AetherGraphics.Managed）
+      │                              ・AetherGraphicsNative.dll を Unity のプラグインとして読み込ませる
       │                              ・Aether のレンダーパイプライン（HDRP の代わり）
       │                              ・シーンのキャプチャ（Scene Data Contract で毎フレーム渡す）
       │                              ・描画イベントの発行、Unity の統計の送信
       ▼
-AetherNative.dll（C++、src/Aether.Native）
+AetherGraphicsNative.dll（C++、src/AetherGraphics.Native）
       ├─ Device      IUnityGraphicsD3D12v7 → HostGfx、C API
       ├─ Renderer    コマンドリスト、シーンのレンダラー、レンダーグラフ、BVH
       ├─ Resources   GPU リソースマネージャー、リソースの登録簿
@@ -20,9 +20,9 @@ AetherNative.dll（C++、src/Aether.Native）
       ├─ ImGui       ゲーム内オーバーレイ（F10）
       ├─ Profiler    フレーム統計、ベンチマーク
       ├─ Core        構造化ログ、設定、実験用スイッチ
-      └─ Ipc         名前付きパイプ \\.\pipe\Aether.Runtime（JSON 1 行 = 1 要求）
+      └─ Ipc         名前付きパイプ \\.\pipe\AetherGraphics.Runtime（JSON 1 行 = 1 要求）
                                    ▲
-Aether.MCP.exe（C#、src/Aether.MCP）──┘   stdio の MCP ⇔ パイプ。ゲームとは別プロセス
+AetherGraphics.MCP.exe（C#、src/AetherGraphics.MCP）──┘   stdio の MCP ⇔ パイプ。ゲームとは別プロセス
       ▲
    AI エージェント
 ```
@@ -34,7 +34,7 @@ Aether.MCP.exe（C#、src/Aether.MCP）──┘   stdio の MCP ⇔ パイプ�
 
 ## モジュール
 
-### C#（`src/Aether.Managed`）
+### C#（`src/AetherGraphics.Managed`）
 
 | 場所 | 役割 |
 |---|---|
@@ -46,7 +46,7 @@ Aether.MCP.exe（C#、src/Aether.MCP）──┘   stdio の MCP ⇔ パイプ�
 | `GameIntegration/` | DX12 でゲームを動かすための対処（`HdrpDx12Fix`、`GameDx12Workarounds`）、ゲームの設定の読み取り（`HostFrameSettings`）、Aether の画質設定を Unity に書く（`HostQualitySettings`）、オーバーレイ使用中のゲームの入力の遮断（`GameInputBlock`） |
 | `Diagnostics/` | Unity の統計（`UnityStats`）、開発用の固定カメラ（`DevCamera`） |
 
-### C++（`src/Aether.Native`）
+### C++（`src/AetherGraphics.Native`）
 
 | 場所 | 役割 |
 |---|---|
@@ -71,7 +71,7 @@ Aether.MCP.exe（C#、src/Aether.MCP）──┘   stdio の MCP ⇔ パイプ�
 | 場所 | 役割 |
 |---|---|
 | `shaders/` | Aether の HLSL（シーン、全画面パス、パーティクル、BVH、テスト三角形） |
-| `src/Aether.MCP` | MCP サーバー。ツールの定義は `Tools/ToolCatalog.cs` |
+| `src/AetherGraphics.MCP` | MCP サーバー。ツールの定義は `Tools/ToolCatalog.cs` |
 | `tests/host` | テストホスト。自前のデバイスとウィンドウで Aether を Unity と同じ順序で動かす |
 
 ## スレッド
