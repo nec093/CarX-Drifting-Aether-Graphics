@@ -14,7 +14,7 @@
 
 namespace aether {
 
-const char* const kAetherVersion = "0.1.0";
+const char* const kAetherVersion = "0.4.0";
 
 std::wstring NewCapturePath(const wchar_t* prefix, const wchar_t* extension) {
 	static std::atomic<uint32_t> counter{0};

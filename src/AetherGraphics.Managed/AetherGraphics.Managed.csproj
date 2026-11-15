@@ -4,7 +4,7 @@
 		<LangVersion>9</LangVersion>
 		<AssemblyName>AetherGraphics</AssemblyName>
 		<RootNamespace>AetherGraphics</RootNamespace>
-		<Version>0.1.0</Version>
+		<Version>0.4.0</Version>
 		<Nullable>disable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

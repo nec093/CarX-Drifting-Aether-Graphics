@@ -12,7 +12,7 @@ namespace AetherGraphics.Mcp.Server;
 /// diagnostics go to stderr.
 /// </summary>
 public sealed class McpServer(RuntimeClient client) {
-	private const string ServerVersion = "0.1.0";
+	private const string ServerVersion = "0.4.0";
 	private static readonly string[] KnownProtocols = ["2025-06-18", "2025-03-26", "2024-11-05"];
 	private readonly Dictionary<string, Tool> tools_ = ToolCatalog.All.ToDictionary(t => t.Name);
 	private static readonly JsonSerializerOptions Compact = new() { WriteIndented = false };

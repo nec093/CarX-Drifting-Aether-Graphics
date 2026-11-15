@@ -6,7 +6,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<AssemblyName>AetherGraphics.MCP</AssemblyName>
 		<RootNamespace>AetherGraphics.Mcp</RootNamespace>
-		<Version>0.1.0</Version>
+		<Version>0.4.0</Version>
 		<InvariantGlobalization>true</InvariantGlobalization>
 		<SatelliteResourceLanguages>en</SatelliteResourceLanguages>
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

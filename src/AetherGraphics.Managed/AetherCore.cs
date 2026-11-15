@@ -14,7 +14,7 @@ namespace AetherGraphics {
 	/// </summary>
 
 	public class AetherCore : MonoBehaviour {
-		public const string Version = "0.1.0";
+		public const string Version = "0.4.0";
 		/// <summary>Set by the loader's entry point before this component is created.</summary>
 		public static IAetherHost Host;
 
