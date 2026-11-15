@@ -16,7 +16,7 @@ namespace AetherGraphics {
 	/// The shader is the game's own (no source), so it cannot be rebuilt like HDRP's: on DX12 the pass is switched off
 	/// (CustomPass.enabled), which lets the frame complete. What that pass would have drawn or culled is then missing
 	/// or unculled: a known limitation while HDRP is the renderer.
-	/// Opt out with the file kino/config/AetherGraphics/keep-game-passes.
+	/// Opt out with the file AetherLoader/config/nec093.aether.graphics/keep-game-passes.
 	/// </summary>
 	internal static class GameDx12Workarounds {
 		// Custom pass types (full names) seen failing on DX12 in this game build (2.28.3): the GPU culling pass

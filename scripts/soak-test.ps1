@@ -21,10 +21,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-# where Aether lives depends on the loader it was deployed for (scripts\deploy.ps1)
-$bepinex = Test-Path (Join-Path $GameDir 'BepInEx\plugins\AetherGraphics\AetherGraphics.dll')
-$dataDir = if ($bepinex) { Join-Path $GameDir 'BepInEx\plugins\AetherGraphics' } else { Join-Path $GameDir 'kino\mods\AetherGraphics' }
-$configDir = if ($bepinex) { Join-Path $GameDir 'BepInEx\config\AetherGraphics' } else { Join-Path $GameDir 'kino\config\AetherGraphics' }
+# where the mod is installed (scripts\deploy.ps1): Aether Loader (default), BepInEx, else KSL
+$installs = @(@('AetherLoader\mods\AetherGraphics', 'AetherLoader\config\nec093.aether.graphics'), @('BepInEx\plugins\AetherGraphics', 'BepInEx\config\AetherGraphics'), @('kino\mods\AetherGraphics', 'kino\config\AetherGraphics'))
+$install = $installs | Where-Object { Test-Path (Join-Path (Join-Path $GameDir $_[0]) 'AetherGraphics.dll') } | Select-Object -First 1
+if (-not $install) { $install = $installs[2] }
+$dataDir = Join-Path $GameDir $install[0]
+$configDir = Join-Path $GameDir $install[1]
 $cfg = Join-Path $configDir 'aether.json'
 $devFile = Join-Path $configDir 'dev-options.json'
 $log = Join-Path $dataDir 'logs\aether.jsonl'

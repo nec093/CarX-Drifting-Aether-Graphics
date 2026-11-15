@@ -71,7 +71,7 @@ AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 | `capture_render_graph` | なし | レンダーグラフを JSON で `captures\` に保存して返す |
 | `run_benchmark` | `seconds`（1〜600、既定 10）、`label`（64 文字まで、既定 `mcp`）、`wait`（既定 true）、`vsync`（既定 true） | 指定秒数だけ計測して JSON で `benchmarks\` に保存し、結果を返す（平均 FPS、1% low、フレーム時間、GPU 時間、VRAM の開始 / 終了 / 最大、リソース統計、レンダーグラフ）。`vsync: false` で計測中だけ VSync とフレームレート上限を外す。`wait: false` ならすぐ返るので `get_benchmark` で待つ |
 
-`captures\` と `benchmarks\` は Aether のデータフォルダー（BepInEx なら `BepInEx\plugins\AetherGraphics\`）の下です。
+`captures\` と `benchmarks\` は Aether のデータフォルダー（Aether Loader なら `AetherLoader\mods\AetherGraphics\`）の下です。
 
 ### set_render_mode
 
@@ -140,6 +140,7 @@ AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 | `vsync` | 0〜2（整数） | 垂直同期：0 オフ、1 毎リフレッシュ、2 1 回おき |
 | `exposureEV` | −10〜10 | シーンの露出に足す補正（段） |
 | `tonemap` | `host` / `agx` / `aces` / `neutral` / `none` | トーンマッピングの曲線 |
+| `hostGrading` | `true` / `false` | ゲームのトーンカーブとカラーグレーディング（ポスト露出、シャドウ / ミッドトーン / ハイライト）を使うか。`false` では `tonemap` の `host` は AgX になる |
 | `pathTracing` | `off` / `freeCamera` / `always` | パストレーシング：オフ、フリーカメラ（F11）の間だけ（既定）、常に |
 | `pathTracingBounces` | 1〜12（整数） | パストレーシングの経路のバウンス数（既定 4） |
 | `pathTracingMaxSamples` | 1〜100000（整数） | パストレーシングを重ねる画素あたりのサンプル数の上限（既定 4096） |

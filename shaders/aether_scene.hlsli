@@ -82,6 +82,13 @@ struct MaterialData {
 	float4 params2;          // x clear coat, y clear coat roughness, z material class, w flags
 	float4 uvScaleOffset;
 	float4 params3;          // x mask layout (0 none, 1 HDRP, 2 RMO), y has mask texture, z has normal texture, w has extra texture
+	// HDRP/LayeredLit: layers 1 .. 3 over layer 0 (the fields above); their textures in g_SceneTextures by heap index
+	float4 layerInfo;        // x layer count (1: none), y the vertex colour with the mask (0 not, 1 multiplied, 2 added)
+	float4 layerMaskUv;      // scale xy, offset zw of the mesh's uv
+	uint4 layerTex[3];       // heap indices (0xFFFFFFFF none): mask, then per layer base, normal, mask
+	float4 layerColor[3];
+	float4 layerParams[3];   // metallic, roughness, normal scale, mask layout
+	float4 layerUv[3];       // scale xy, offset zw of the mesh's uv
 };
 
 struct LightData {

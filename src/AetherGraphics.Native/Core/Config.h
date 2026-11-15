@@ -1,4 +1,4 @@
-// Settings: one JSON file (kino/config/AetherGraphics/aether.json). Every change goes through Settings::Set, which validates
+// Settings: one JSON file (AetherLoader/config/nec093.aether.graphics/aether.json). Every change goes through Settings::Set, which validates
 // the value; the overlay and the MCP control tools use the same entry point.
 #pragma once
 #include "Common.h"
@@ -69,6 +69,9 @@ struct SettingsData {
 	int anisotropicLevel = 9; // Anisotropic texture filtering level
 	int vsync = 1; // Vertical sync: 0 off, 1 every refresh, 2 every second refresh
 	std::string tonemap = "host";    // host (the curve of the game renderer) | agx | aces | neutral | none
+	// The game's own tone mapping and colour grading: its tone curve, its post exposure and its shadows / midtones /
+	// highlights grading, as its volumes set them. Off: none of them; tonemap "host" is drawn with AgX.
+	bool hostGrading = true;
 	std::string reflectionDenoiser = "nrd"; // nrd | off: the reflection rays sample each surface's GGX lobe and NVIDIA NRD (REBLUR) denoises them (off: mirror rays, not denoised)
 	float exposureEV = 0.0f;         // exposure bias in stops on top of the scene's exposure
 	int vramBudgetMB = 2048;         // budget for Aether-owned GPU memory (0 = none): crossing it is reported, nothing is freed

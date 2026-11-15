@@ -11,9 +11,9 @@
 		<GenerateDocumentationFile>false</GenerateDocumentationFile>
 		<OutputPath>$(MSBuildThisFileDirectory)..\..\build\managed\$(Loader)\$(Configuration)\</OutputPath>
 
-		<!-- Which mod loader's entry point is compiled in (Loaders/<name>): Ksl, BepInEx, or None (core only, to check it
+		<!-- Which mod loader's entry point is compiled in (Loaders/<name>): AetherLoader, BepInEx, Ksl, or None (core only, to check it
 		     compiles without any loader). One assembly either way: the core's sources are part of it. -->
-		<Loader Condition="'$(Loader)' == ''">Ksl</Loader>
+		<Loader Condition="'$(Loader)' == ''">AetherLoader</Loader>
 		<!-- BepInEx.dll (BepInEx 5, Mono): the game's BepInEx\core folder once BepInEx is installed (set below) -->
 
 
@@ -22,6 +22,8 @@
 		<GameDir Condition="'$(GameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\CarX Drift Racing Online</GameDir>
 		<ManagedDir>$(GameDir)\Drift Racing Online_Data\Managed</ManagedDir>
 		<BepInExDir Condition="'$(BepInExDir)' == ''">$(GameDir)\BepInEx\core</BepInExDir>
+		<!-- Aether.API.dll: Aether Loader's SDK, from the installed loader (github.com/nec093/CarX-Drifting-Aether-Loader) -->
+		<AetherApiDir Condition="'$(AetherApiDir)' == ''">$(GameDir)\BepInEx\plugins\AetherLoader</AetherApiDir>
 		<!-- KSL.API.dll and 0Harmony.dll from https://github.com/trbflxr/ksl_sdk/releases (lib/README.md) -->
 		<KslApiDir Condition="'$(KslApiDir)' == ''">$(MSBuildThisFileDirectory)..\..\lib</KslApiDir>
 
@@ -40,8 +42,10 @@
 
 	<ItemGroup>
 		<Compile Remove="Loaders\**\*.cs" />
+		<None Remove="Loaders\**" />
 		<Compile Include="Loaders\$(Loader)\**\*.cs" Condition="'$(Loader)' != 'None'" />
 		<Reference Include="KSL.API" HintPath="$(KslApiDir)\KSL.API.dll" Private="false" Condition="'$(Loader)' == 'Ksl'" />
+		<Reference Include="Aether.API" HintPath="$(AetherApiDir)\Aether.API.dll" Private="false" Condition="'$(Loader)' == 'AetherLoader'" />
 		<Reference Include="BepInEx" HintPath="$(BepInExDir)\BepInEx.dll" Private="false" Condition="'$(Loader)' == 'BepInEx'" />
 		<!-- BepInEx.dll is built against the UnityEngine.dll facade (type forwarders to the modules) -->
 		<Reference Include="UnityEngine" HintPath="$(ManagedDir)\UnityEngine.dll" Private="false" Condition="'$(Loader)' == 'BepInEx'" />
@@ -71,4 +75,10 @@
 		<Exec Command="&quot;$(MaykrExe)&quot; &quot;$(TargetPath)&quot; -c &quot;$(MaykrKey)&quot; -o &quot;$(MaykrOutDir)&quot; -np" />
 		<Message Importance="high" Text="AetherGraphics.ksm built into $(MaykrOutDir)" />
 	</Target>
-</Project>
+	<!-- Aether Loader: mod.json beside the DLL, with this project's version -->
+	<Target Name="AetherLoaderManifest" AfterTargets="Build" Condition="'$(Loader)' == 'AetherLoader'">
+		<PropertyGroup>
+			<ModJson>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)Loaders\AetherLoader\mod.json').Replace('@VERSION@', '$(Version)'))</ModJson>
+		</PropertyGroup>
+		<WriteLinesToFile File="$(OutDir)mod.json" Lines="$(ModJson)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+	</Target></Project>

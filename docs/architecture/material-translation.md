@@ -20,6 +20,7 @@
 | `vehicleGeneric`（3、`CLASS_VEHICLE_GENERIC`） | `_BaseMap`、`_PackMap` | CarGeneric、CarGenericAlpha |
 | `standard`（1、`CLASS_STANDARD`） | `_BASE_COLOR_MAP` と `_METALNESS` | HDRP の 3ds Max 物理マテリアル |
 | `standard` / `transparent`（9、`CLASS_TRANSPARENT`） | `_BaseColorMap`、`_Metallic`、`_Smoothness` | HDRP/Lit |
+| `standard`（層つき） | `_LayerCount`、`_BaseColorMap0` | HDRP/LayeredLit（HDRP 向けに作られたマップの道路や地面）。説明は下の「HDRP/LayeredLit」 |
 | `colorMask`（7、`CLASS_COLOR_MASK`） | `_BaseColorMap`、`_MaskMap`、`_BaseColor` | Colormask |
 | `vegetation`（8、`CLASS_VEGETATION`） | `_BaseColorMap`、`_DiffusionProfileHash` | CarXFoliageSimple |
 | `blobShadow`（14、`CLASS_BLOB_SHADOW`） | シェーダー名に `Blobshadow` を含む | CarBlobshadow |
@@ -97,6 +98,27 @@ UV の拡大とずらし（`uvScale`、`uvOffset`）は、クラスの主テク�
 | その他の既定値 | `baseColor` 白、`metallic` 0、`roughness` 0.6、`normalScale` 1、`alphaCutoff` 0.5 |
 
 `shaderId`（シェーダーのインスタンス id）と `renderQueue` は診断用に入れる。
+
+## HDRP/LayeredLit
+
+HDRP 向けに作られたマップ（kino の `.knmap` など）の道路や地面に使われる。層は最大 4 つで、層ごとに名前の後ろに番号が付く（`_BaseColor0`〜`3`、`_BaseColorMap0`〜`3` など）。無印の `_BaseColorMap` を持たない。
+
+- **層 0:** HDRP/Lit と同じ値の取り方で、材質そのものに入れる。
+  - `_BaseColor0`、`_BaseColorMap0`、`_NormalMap0`、`_NormalScale0`、`_MaskMap0`
+  - マスクがあれば `_MetallicRemapMax0` / `_SmoothnessRemapMax0`、無ければ `_Metallic0` / `_Smoothness0`
+  - テクスチャの倍率とずれは `_BaseColorMap0` のもの
+- **層 1〜3:** 契約 8 の `layerCount`、`layerTextures`（層のマスク、層ごとのベース・法線・マスク）、`layerColor`、`layerParams`（金属度、粗さ、法線の強さ、マスクの配置）、`layerUv`（層ごとのテクスチャの倍率とずれ）で渡す。シェーダーは、層のテクスチャをヒープ上の位置で `g_SceneTextures` から読む（材質ごとの 5 枚の表は増やさない）。
+- **混ぜ方（HDRP の `ComputeMaskWeights` と同じ）:**
+  - `_LayerMaskMap` の A が層 0、R・G・B が層 1・2・3 の割合。上の層から順に割合を取り、余りを下の層に回す。
+  - `_VertexColorMode` が 1 なら頂点カラーを掛け、2 なら `頂点カラー × 2 − 1` を足す。
+  - 色、金属度、粗さ、遮蔽、接空間の法線をこの重みで混ぜる。
+- **再現していないもの:**
+  - 高さによる混ぜ方（Height based blend）
+  - 層 0 の色を引き継ぐ設定（Inherit）
+  - 層ごとの平面・三平面への投影（メッシュの UV を使う）
+  - 光線が当たった面の色（層 0 のベースのテクスチャで色を付ける）
+- **以前の不具合:** `_BaseColorMap` が無いため、照明計算用の隠しプロパティ `_MainTex`（空）の判定に入り、黒い unlit として描いていた。
+- **確かめ方:** `get_material_info detail=aether` の `layers` に、層の数と、層のテクスチャが渡っているか（`bound`）が出る。
 
 ## MaterialPropertyBlock
 

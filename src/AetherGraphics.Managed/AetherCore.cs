@@ -34,12 +34,16 @@ namespace AetherGraphics {
 		public float ShadowDistance => capture_.ShadowDistance;
 		private bool dropScene_; // the capture stopped: one more scene event lets the native side release what it held
 
-		/// <summary>Starts the core on a game object of its own that survives scene changes. Main thread.</summary>
-		public static AetherCore Create(IAetherHost host) {
+		/// <summary>Starts the core on a game object that survives scene changes: the loader's own (Aether Loader gives each
+		/// mod one) or, without one, a new one. Main thread.</summary>
+		public static AetherCore Create(IAetherHost host, GameObject on = null) {
 			Host = host;
-			var go = new GameObject("Aether Graphics");
-			UnityEngine.Object.DontDestroyOnLoad(go);
-			go.hideFlags = HideFlags.HideAndDontSave;
+			GameObject go = on;
+			if (go == null) {
+				go = new GameObject("Aether Graphics");
+				UnityEngine.Object.DontDestroyOnLoad(go);
+				go.hideFlags = HideFlags.HideAndDontSave;
+			}
 			return go.AddComponent<AetherCore>();
 		}
 
@@ -98,7 +102,7 @@ namespace AetherGraphics {
 			PublishManaged();
 			if (!interfaces || !d3d12) {
 				HdrpDx12Fix.Ensure();
-				status_ = interfaces ? "Unity did not hand out its D3D12 interface (see kino/mods/AetherGraphics/logs/aether.jsonl)"
+				status_ = interfaces ? "Unity did not hand out its D3D12 interface (see " + Path.Combine(dataDir, "logs", "aether.jsonl") + ")"
 					: "Unity did not call UnityPluginLoad on AetherGraphicsNative.dll (" + Native.LoadStrategy + "): no access to the D3D12 device";
 				Host.LogError("[Aether Graphics] " + status_);
 				// stay loaded: the log and the MCP connection still work for diagnosis, nothing is rendered
@@ -445,7 +449,7 @@ namespace AetherGraphics {
 			if (GUILayout.Button(visible ? "Hide the overlay (F10)" : "Show the overlay (F10)")) {
 				Native.Aether_SetOverlayVisible(visible ? 0 : 1);
 			}
-			GUILayout.Label("Logs, captures and benchmarks: kino/mods/AetherGraphics");
+			GUILayout.Label("Logs, captures and benchmarks: " + Host.DataDir);
 		}
 	}
 }

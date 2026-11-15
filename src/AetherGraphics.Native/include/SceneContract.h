@@ -7,7 +7,7 @@
 #pragma once
 #include <stdint.h>
 
-#define AE_SCENE_CONTRACT_VERSION 7 // 7: the host's screen space reflection settings; particles (Aether_SceneSubmitParticles) // 6: the host's post-processing settings (bloom, motion blur, antialiasing) // 5: 5: the sky is the host's own cube map (plain mip chain) with an intensity and a rotation // 4: 4: the host's exposure settings (Aether meters itself when there is no exposure texture) // 3: the host's shadow, ambient occlusion and grading settings on the frame // 2: rendering layer masks on instances and lights (light layers)
+#define AE_SCENE_CONTRACT_VERSION 8 // 8: HDRP/LayeredLit layers on materials (layerCount, layerTextures, ...) // 7: the host's screen space reflection settings; particles (Aether_SceneSubmitParticles) // 6: the host's post-processing settings (bloom, motion blur, antialiasing) // 5: 5: the sky is the host's own cube map (plain mip chain) with an intensity and a rotation // 4: 4: the host's exposure settings (Aether meters itself when there is no exposure texture) // 3: the host's shadow, ambient occlusion and grading settings on the frame // 2: rendering layer masks on instances and lights (light layers)
 
 // A stable identifier chosen by the managed side (Unity's instance id). 0 = none. Unique per kind, not across kinds.
 typedef uint32_t AeHandle;
@@ -142,6 +142,14 @@ typedef struct AeMaterialDesc {
 	float uvScale[2];
 	float uvOffset[2];
 	AeHandle textures[kAeSlotCount]; // 0 = none (white / flat normal / no mask)
+	// HDRP/LayeredLit: layers 1 .. layerCount - 1 over the material's own (layer 0), blended by the layer mask
+	uint32_t layerCount;        // 0 / 1: one layer; 2 .. 4
+	uint32_t layerVertexColor;  // the layer mask and the vertex colour: 0 the mask alone, 1 multiplied, 2 added (HDRP's _VertexColorMode)
+	AeHandle layerTextures[10]; // the layer mask, then per layer 1 .. 3: base, normal, mask (0 = none)
+	float layerMaskUv[4];       // the layer mask's uv from the mesh's: scale xy, offset zw
+	float layerColor[3][4];     // per layer 1 .. 3: base colour (linear)
+	float layerParams[3][4];    // per layer 1 .. 3: metallic, roughness, normal scale, mask layout (AeMaskLayout)
+	float layerUv[3][4];        // per layer 1 .. 3: uv from the mesh's: scale xy, offset zw
 	uint32_t reserved[3];
 } AeMaterialDesc;
 

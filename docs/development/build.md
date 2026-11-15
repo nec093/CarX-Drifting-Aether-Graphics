@@ -3,19 +3,30 @@
 ## ローダー
 
 C# 側は、ローダーに依存しないコア（`AetherCore`、`IAetherHost`）と、ローダーごとの入口（`src/AetherGraphics.Managed/Loaders/`）に分かれています。
-どの入口を組み込むかはビルド時に `-p:Loader=BepInEx|Ksl|None` で選びます。`None` はコアだけのコンパイル確認用です。
+どの入口を組み込むかはビルド時に `-p:Loader=AetherLoader|BepInEx|Ksl|None` で選びます。`None` はコアだけのコンパイル確認用です。
 
-既定のローダーは BepInEx です（`scripts\deploy.ps1` の既定が `-Loader BepInEx`）。KSL の入口も残っています。
+既定のローダーは Aether Loader です（csproj の `Loader` と `scripts\deploy.ps1` の既定が `AetherLoader`）。Aether Graphics は Aether Mod（ID `nec093.aether.graphics`）として読み込まれます。BepInEx に直接読み込ませる入口と、KSL の入口も残っています。
 
-| | BepInEx（既定） | KSL |
-|---|---|---|
-| 入口 | `Loaders/BepInEx/AetherPlugin.cs` | `Loaders/Ksl/AetherKslMod.cs` |
-| 必要なもの | ゲームに BepInEx 5（Mono、x64）を導入 | KSL SDK（`KSL.API.dll`）、`maykr.exe`、ビルドキー |
-| Aether の置き場所 | `BepInEx\plugins\AetherGraphics\` | `kino\mods\AetherGraphics.ksm` と `kino\mods\AetherGraphics\` |
-| 設定 | `BepInEx\config\AetherGraphics\` | `kino\config\AetherGraphics\` |
-| C# 側のログ | `BepInEx\LogOutput.log` | `kino\output.log` |
-| 署名 | 不要 | 必要（KSL のサーバーに問い合わせる） |
-| ローダー側の UI | なし（Aether のオーバーレイ F10 のみ） | KSL のパネルに状態表示 |
+| | Aether Loader（既定） | BepInEx | KSL |
+|---|---|---|---|
+| 入口 | `Loaders/AetherLoader/AetherGraphicsMod.cs` と `mod.json` | `Loaders/BepInEx/AetherPlugin.cs` | `Loaders/Ksl/AetherKslMod.cs` |
+| 必要なもの | BepInEx 5 と Aether Loader（`CarX-Drifting-Aether-Loader`） | BepInEx 5（Mono、x64） | KSL SDK（`KSL.API.dll`）、`maykr.exe`、ビルドキー |
+| Aether の置き場所 | `AetherLoader\mods\AetherGraphics\` | `BepInEx\plugins\AetherGraphics\` | `kino\mods\AetherGraphics.ksm` と `kino\mods\AetherGraphics\` |
+| 設定 | `AetherLoader\config\nec093.aether.graphics\` | `BepInEx\config\AetherGraphics\` | `kino\config\AetherGraphics\` |
+| C# 側のログ | `BepInEx\LogOutput.log`（ソース名 `nec093.aether.graphics`） | `BepInEx\LogOutput.log` | `kino\output.log` |
+| 署名 | 不要 | 不要 | 必要（KSL のサーバーに問い合わせる） |
+| ローダー側の UI | Aether Loader の一覧（F9）で状態と有効／無効 | なし | KSL のパネルに状態表示 |
+
+### Aether Loader の導入
+
+- BepInEx 5 を入れたうえで、Aether Loader のリポジトリで `scripts\deploy.ps1 -Build` を実行します（`BepInEx\plugins\AetherLoader\` に `AetherLoader.dll` と `Aether.API.dll`）。
+- Aether Graphics のビルドは、入っている Aether Loader の `Aether.API.dll` を参照します（csproj の `AetherApiDir`、既定 `<GameDir>\BepInEx\plugins\AetherLoader`）。
+- `mod.json` の版は csproj の `Version` から作ります（`Loaders/AetherLoader/mod.json` の `@VERSION@` をビルド時に置き換える）。
+- コアは、Aether Loader が Mod に渡す GameObject（`ModContext.Root`）の上で動きます。ゲームの終了時には、コア自身の `OnApplicationQuit` で止まります。
+- 読み込まれたかは、次の 3 か所で分かります。
+  - Aether Loader の一覧（F9）
+  - `AetherLoader\logs\status.json`
+  - MCP の `get_status` の `managed.loader`（`Aether Loader <版> (Aether.API <版>)`）。`managed.mods` には、ほかに読み込まれている Aether Mod が出ます。
 
 ### BepInEx の導入
 
@@ -27,7 +38,7 @@ C# 側は、ローダーに依存しないコア（`AetherCore`、`IAetherHost`�
   - この環境では、KSL の `winhttp.dll` を `winhttp.dll.aether-off` に改名して KSL を無効にしています。KSL に戻すときは名前を戻します。戻す前に、`BepInEx\` の中の必要なもの（設定、キャプチャー）を別の場所へ写してください。
 - Aether Graphics は kino（KSL の拡張）に依存しません。
 - `deploy.ps1` は `BepInEx\core\BepInEx.dll` が無いと失敗します。
-- 読み込まれたかは `BepInEx\LogOutput.log` と、MCP の `get_status` の `managed.loader`（`BepInEx <版>`）で分かります。
+- BepInEx に直接読み込ませた（`-Loader BepInEx`）ときは、`BepInEx\LogOutput.log` と、MCP の `get_status` の `managed.loader`（`BepInEx <版>`）で分かります。
 
 ### KSL を使う場合
 
@@ -57,12 +68,13 @@ C# 側は、ローダーに依存しないコア（`AetherCore`、`IAetherHost`�
 | ネイティブの依存（初回だけ） | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-deps.ps1` | `build\deps\` |
 | ネイティブ（`AetherGraphicsNative.dll`、`AetherHost.exe`） | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-native.ps1 [-Config RelWithDebInfo] [-Clean]` | `build\native\<Config>\` |
 | MCP サーバー | `dotnet build src\AetherGraphics.MCP\AetherGraphics.MCP.csproj -c Release` | `build\mcp\Release\AetherGraphics.MCP.exe` |
+| C# Mod（Aether Loader 用） | `dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Release -p:Loader=AetherLoader` | `build\managed\AetherLoader\Release\AetherGraphics.dll` と `mod.json` |
 | C# Mod（BepInEx 用） | `dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Release -p:Loader=BepInEx` | `build\managed\BepInEx\Release\AetherGraphics.dll` |
 | C# Mod（KSL 用） | `dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Release -p:Loader=Ksl` | `build\managed\Ksl\Release\AetherGraphics.dll`。`maykr.exe` とキーがあれば `kino\mods\AetherGraphics.ksm` も |
 | C# のコアだけのコンパイル確認 | `dotnet build src\AetherGraphics.Managed\AetherGraphics.Managed.csproj -c Debug -p:Loader=None` | `build\managed\None\Debug\` |
 | HDRP の DX12 用バンドル | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-hdrp-bundle.ps1` | `build\unity\aether_hdrp_dx12.bundle` |
 
-**C# Mod は必ず `-p:Loader=BepInEx` を付けてビルドします。** 出力先は `build\managed\<Loader>\<Configuration>\` です。csproj の `Loader` の既定は `Ksl` なので、何も付けない `dotnet build` は `build\managed\Ksl\Release\` に書きます。`deploy.ps1`（既定 `-Loader BepInEx`）が配置するのは `build\managed\BepInEx\Release\AetherGraphics.dll` なので、何も付けないビルドの結果は配置されません。
+**C# Mod の出力先はローダーごとに違います**（`build\managed\<Loader>\<Configuration>\`）。`deploy.ps1 -Loader X` が配置するのは `build\managed\X\Release\` のものです。csproj と `deploy.ps1` の既定はどちらも `AetherLoader` です。BepInEx 用を配置するときは、ビルドにも `-p:Loader=BepInEx` を付けます。
 
 - ゲームが既定の場所（`C:\Program Files (x86)\Steam\steamapps\common\CarX Drift Racing Online`）に無いときは `-p:GameDir="D:\...\CarX Drift Racing Online"` も付けます。参照する DLL と、BepInEx の `BepInEx.dll` はこのフォルダーから探します。
 - `deploy.ps1 -Build` は、ネイティブと C# Mod を `-c Release -p:GameDir=<GameDir> -p:Loader=<Loader>` で一緒にビルドします。
@@ -71,22 +83,27 @@ C# 側は、ローダーに依存しないコア（`AetherCore`、`IAetherHost`�
 ## 配置
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 [-Loader BepInEx|Ksl] [-Config RelWithDebInfo] [-GameDir <dir>] [-Build] [-Remove]
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 [-Loader AetherLoader|BepInEx|Ksl] [-Config RelWithDebInfo] [-GameDir <dir>] [-Build] [-Remove]
 ```
 
 ゲームを閉じてから実行します（DLL がロックされるため、起動中は失敗します）。
 
-BepInEx（既定）のとき：
+Aether Loader（既定）のとき：
 
 | ファイル（リポジトリ） | 配置先（ゲームのフォルダー） |
 |---|---|
-| `build\managed\BepInEx\Release\AetherGraphics.dll` | `BepInEx\plugins\AetherGraphics\` |
-| `build\native\<Config>\AetherGraphicsNative.dll`（と `.pdb`） | `BepInEx\plugins\AetherGraphics\native\` |
-| `build\native\<Config>\dxcompiler.dll`、`dxil.dll`（Windows SDK の `Redist\D3D\x64` からビルド時にコピー） | `BepInEx\plugins\AetherGraphics\native\` |
-| `shaders\*` | `BepInEx\plugins\AetherGraphics\shaders\` |
-| `build\unity\aether_hdrp_dx12.bundle` | `BepInEx\plugins\AetherGraphics\hdrp\` |
+| `build\managed\AetherLoader\Release\AetherGraphics.dll`、`mod.json` | `AetherLoader\mods\AetherGraphics\` |
+| `build\native\<Config>\AetherGraphicsNative.dll`（と `.pdb`） | `AetherLoader\mods\AetherGraphics\native\` |
+| `build\native\<Config>\dxcompiler.dll`、`dxil.dll`（Windows SDK の `Redist\D3D\x64` からビルド時にコピー） | `AetherLoader\mods\AetherGraphics\native\` |
+| `shaders\*` | `AetherLoader\mods\AetherGraphics\shaders\` |
+| `build\unity\aether_hdrp_dx12.bundle` | `AetherLoader\mods\AetherGraphics\hdrp\` |
 
-- KSL 側に残っている `kino\mods\AetherGraphics.dll` / `AetherGraphics.ksm` は削除します（2 つのローダーから二重に起動しないため）。
+- **BepInEx 用の配置（`BepInEx\plugins\AetherGraphics\`）があるとき:** Aether Loader の Mod フォルダーへ移します。
+  - ログ、キャプチャー、ベンチマークはそのまま移し、プラグインの DLL は消します。
+  - 設定（`BepInEx\config\AetherGraphics\`）は `AetherLoader\config\nec093.aether.graphics\` へ移します。
+  - 移す先に同じ名前のファイルがあるときは、移す先のものを残します。
+- **`-Loader BepInEx` のとき:** 同じ構成で `BepInEx\plugins\AetherGraphics\` に置きます。Aether Loader 側の `mod.json` と DLL は消し（データは残す）、二重に起動しないようにします。
+- **KSL 側に `kino\mods\AetherGraphics.dll` / `AetherGraphics.ksm` が残っているとき:** 削除します（2 つのローダーから二重に起動しないため）。
 - `-Loader Ksl` のときは、`AetherGraphics.ksm`（署名済みが無ければ生の `AetherGraphics.dll`）を `kino\mods\` に、ネイティブ、シェーダー、バンドルを `kino\mods\AetherGraphics\` に置きます。
 - バンドルがリポジトリにも配置先にも無いと警告を出します（DX12 でゲーム純正のレンダラーを使うモードの画面が黒くなる）。
 - `AetherGraphicsNative.dll` は、Mod が起動時に `<Game>_Data\Plugins\x86_64\` へコピーします（Unity のプラグインローダーに読み込ませるため。理由は [dx12-integration.md](../architecture/dx12-integration.md)）。
@@ -121,7 +138,7 @@ BepInEx（既定）のとき：
 
 ## 開発用の補助
 
-どれも設定フォルダー（BepInEx なら `BepInEx\config\AetherGraphics\`）に置くファイルか、MCP のツールです。終わったらファイルを消します。
+どれも設定フォルダー（Aether Loader なら `AetherLoader\config\nec093.aether.graphics\`）に置くファイルか、MCP のツールです。終わったらファイルを消します。
 
 ### dev-camera.txt：画面カメラの固定
 
@@ -137,7 +154,7 @@ BepInEx（既定）のとき：
 
 ### シェーダーのホットリロード
 
-- ランタイムはデータフォルダーの `shaders\`（BepInEx なら `BepInEx\plugins\AetherGraphics\shaders\`）からシェーダーを読みます。
+- ランタイムはデータフォルダーの `shaders\`（Aether Loader なら `AetherLoader\mods\AetherGraphics\shaders\`）からシェーダーを読みます。
 - リポジトリの `shaders\` で編集したファイルをそこへコピーし、MCP の `reload_shader`（操作ツール）を呼ぶか、オーバーレイの Shaders タブの `Reload shaders` を押します。ゲームの再起動は要りません。
 - `reload_shader` はコンパイラの出力を返します。コンパイルに失敗したシェーダーを使うパスは描かれません（`get_shader_errors` で確認）。
 - 配置先のシェーダーを一時的に書き換えた場合は、最後に `deploy.ps1` で戻します。

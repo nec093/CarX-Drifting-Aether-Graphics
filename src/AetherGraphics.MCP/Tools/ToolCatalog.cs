@@ -104,7 +104,7 @@ public static class ToolCatalog {
 			Control: true, TimeoutSeconds: ControlTimeout),
 
 		new("set_graphics_option",
-			"[control] Sets one of Aether's own graphics options (the ones in the overlay's Settings tab): skyMode (physical | scene), timeOfDay (hours), sunHeading (degrees), shadowSoftness, motionBlurStrength, bloomStrength, smokeOpacity, lodBias, anisotropicLevel, vsync, exposureEV, tonemap, reflectionDenoiser (nrd | off), pathTracing (off | freeCamera | always), pathTracingBounces, pathTracingMaxSamples, freeCameraSpeed, freeCameraSensitivity. get_settings shows the values and their ranges. Needs --allow-control and the game's permission.",
+			"[control] Sets one of Aether's own graphics options (the ones in the overlay's Settings tab): skyMode (physical | scene), timeOfDay (hours), sunHeading (degrees), shadowSoftness, motionBlurStrength, bloomStrength, smokeOpacity, lodBias, anisotropicLevel, vsync, exposureEV, tonemap, hostGrading (true | false: the game's tone curve and colour grading), reflectionDenoiser (nrd | off), pathTracing (off | freeCamera | always), pathTracingBounces, pathTracingMaxSamples, freeCameraSpeed, freeCameraSensitivity. get_settings shows the values and their ranges. Needs --allow-control and the game's permission.",
 			"""{"type":"object","properties":{"option":{"type":"string","description":"The option's name, e.g. timeOfDay."},"value":{"type":["number","string"],"description":"The new value."}},"required":["option","value"],"additionalProperties":false}""",
 			"""{"type":"object","properties":{"option":{"type":"string"},"value":{"type":["number","string"]}},"required":["option","value"]}""",
 			Control: true, TimeoutSeconds: ControlTimeout),
@@ -122,19 +122,19 @@ public static class ToolCatalog {
 			Control: true, TimeoutSeconds: ControlTimeout),
 
 		new("capture_frame",
-			"[control] Saves the next frame's back buffer as a PNG in kino/mods/AetherGraphics/captures and returns the file path (optionally the image itself). Needs --allow-control and the game's permission.",
+			"[control] Saves the next frame's back buffer as a PNG in AetherLoader/mods/AetherGraphics/captures and returns the file path (optionally the image itself). Needs --allow-control and the game's permission.",
 			"""{"type":"object","properties":{"withOverlay":{"type":"boolean","description":"Include Aether's overlay in the picture. Default true."},"includeImage":{"type":"boolean","description":"Also return the PNG as image content (can be several MB). Default false."}},"additionalProperties":false}""",
 			"""{"type":"object","properties":{"id":{"type":"integer"},"state":{"type":"string","enum":["pending","encoding","done"]},"file":{"type":"string"},"width":{"type":"integer"},"height":{"type":"integer"}},"required":["state","file"]}""",
 			Control: true, TimeoutSeconds: ControlTimeout, Handler: CaptureFrame),
 
 		new("capture_render_graph",
-			"[control] Writes the current render graph (passes, resources, timings) to a JSON file in kino/mods/AetherGraphics/captures and returns it. Needs --allow-control and the game's permission.",
+			"[control] Writes the current render graph (passes, resources, timings) to a JSON file in AetherLoader/mods/AetherGraphics/captures and returns it. Needs --allow-control and the game's permission.",
 			NoInput,
 			"""{"type":"object","properties":{"file":{"type":"string"},"graph":{"type":"object"}},"required":["file","graph"]}""",
 			Control: true, TimeoutSeconds: ControlTimeout),
 
 		new("run_benchmark",
-			"[control] Records frame times, GPU time, VRAM and draw calls for the given time in the current scene, writes the result as JSON to kino/mods/AetherGraphics/benchmarks and returns it (average FPS, 1% low, frame time percentiles, VRAM start / end / peak, resource statistics, render graph). Needs --allow-control and the game's permission.",
+			"[control] Records frame times, GPU time, VRAM and draw calls for the given time in the current scene, writes the result as JSON to AetherLoader/mods/AetherGraphics/benchmarks and returns it (average FPS, 1% low, frame time percentiles, VRAM start / end / peak, resource statistics, render graph). Needs --allow-control and the game's permission.",
 			"""{"type":"object","properties":{"seconds":{"type":"integer","minimum":1,"maximum":600,"description":"Default 10."},"vsync":{"type":"boolean","description":"false: VSync and the frame rate cap are switched off while the benchmark runs and put back afterwards (uncapped numbers). Default true: the game's own setting."},"label":{"type":"string","maxLength":64,"description":"Name of the run (file name prefix). Default mcp."},"wait":{"type":"boolean","description":"Wait for the result (default true). False returns at once; poll get_benchmark."}},"additionalProperties":false}""",
 			"""{"type":"object","properties":{"state":{"type":"string","enum":["running","done"]},"result":{"type":"object","description":"schema aether.benchmark/1: label, frames, averageFps, onePercentLowFps, pointOnePercentLowFps, frameTimeMs, gpuFrameTimeMs, dedicatedVramBytes{start,end,peak}, aetherResources, unityAtEnd, context, file"}},"required":["state"]}""",
 			Control: true, TimeoutSeconds: ControlTimeout, Handler: RunBenchmark),

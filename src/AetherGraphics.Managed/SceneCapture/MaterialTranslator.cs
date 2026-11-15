@@ -54,11 +54,31 @@ namespace AetherGraphics {
 		private static readonly int MaxRoughness = Shader.PropertyToID("_REFLECTIONS_ROUGHNESS");
 		private static readonly int MaxMetalness = Shader.PropertyToID("_METALNESS");
 		private static readonly int ShouldFlipX = Shader.PropertyToID("_ShouldFlipX");
+		// HDRP/LayeredLit: up to four layers, each with its own set (suffix 0 .. 3), blended by _LayerMaskMap
+		private static readonly int LayerCount = Shader.PropertyToID("_LayerCount");
+		private static readonly int BaseColor0 = Shader.PropertyToID("_BaseColor0");
+		private static readonly int BaseColorMap0 = Shader.PropertyToID("_BaseColorMap0");
+		private static readonly int NormalMap0 = Shader.PropertyToID("_NormalMap0");
+		private static readonly int NormalScale0 = Shader.PropertyToID("_NormalScale0");
+		private static readonly int MaskMap0 = Shader.PropertyToID("_MaskMap0");
+		private static readonly int Metallic0 = Shader.PropertyToID("_Metallic0");
+		private static readonly int Smoothness0 = Shader.PropertyToID("_Smoothness0");
+		private static readonly int MetallicRemapMax0 = Shader.PropertyToID("_MetallicRemapMax0");
+		private static readonly int SmoothnessRemapMax0 = Shader.PropertyToID("_SmoothnessRemapMax0");
+		private static readonly int LayerMaskMap = Shader.PropertyToID("_LayerMaskMap");
+		private static readonly int VertexColorMode = Shader.PropertyToID("_VertexColorMode");
+
+		// the per layer properties of layers 1 .. 3
+		private static int[] LayerIds(string name) => new[] { Shader.PropertyToID(name + "1"), Shader.PropertyToID(name + "2"), Shader.PropertyToID(name + "3") };
+		private static readonly int[] LayerBaseColor = LayerIds("_BaseColor"), LayerBaseColorMap = LayerIds("_BaseColorMap"), LayerNormalMap = LayerIds("_NormalMap"),
+			LayerNormalScale = LayerIds("_NormalScale"), LayerMaskMapIds = LayerIds("_MaskMap"), LayerMetallic = LayerIds("_Metallic"), LayerSmoothness = LayerIds("_Smoothness"),
+			LayerMetallicRemapMax = LayerIds("_MetallicRemapMax"), LayerSmoothnessRemapMax = LayerIds("_SmoothnessRemapMax");
 
 		/// <summary>What a translation produced: the description and the textures it names (slot order).</summary>
 		internal struct Result {
 			public AeMaterialDesc desc;
 			public Texture[] textures; // AeConst.Slot* order, null entries = none
+			public Texture[] layerTextures; // HDRP/LayeredLit: the layer mask, then per layer 1 .. 3 base, normal, mask (AeMaterialDesc.layerTextures order)
 			public string className;
 		}
 
@@ -116,7 +136,7 @@ namespace AetherGraphics {
 		}
 
 		private static unsafe Result TranslateCore(Material m, uint handle) {
-			var r = new Result { textures = new Texture[5] };
+			var r = new Result { textures = new Texture[5], layerTextures = new Texture[10] };
 			AeMaterialDesc d = default;
 			d.structSize = (uint)sizeof(AeMaterialDesc);
 			d.material = handle;
@@ -236,6 +256,60 @@ namespace AetherGraphics {
 				d.roughness = Mathf.Max(m.GetFloat(MaxRoughness), 0.05f);
 				d.metallic = m.GetFloat(MaxMetalness);
 				uvProperty = MaxBaseColorMap;
+			} else if (m.HasProperty(LayerCount) && m.HasProperty(BaseColorMap0)) {
+				// HDRP/LayeredLit (roads, terrain in maps made for HDRP): its main layer as HDRP/Lit is drawn, layers 1 .. 3
+				// over it, blended by _LayerMaskMap (R, G, B for layers 1, 2, 3; with the vertex colour per _VertexColorMode).
+				// Not reproduced: height based blending, layers inheriting the base layer's colour, planar / triplanar layer
+				// mapping (the mesh's uv is used). (It has no _BaseColorMap: before this it fell to the _MainTex case below -
+				// the lightmapper's hidden property, empty - and was drawn black.)
+				cls = AeConst.ClassStandard;
+				int layers = Mathf.Clamp(Mathf.RoundToInt(Float(m, LayerCount, 1)), 1, 4);
+				if (layers > 1) {
+					d.layerCount = (uint)layers;
+					d.layerVertexColor = (uint)Mathf.Clamp(Mathf.RoundToInt(Float(m, VertexColorMode, 0)), 0, 2);
+					r.layerTextures[0] = Tex(m, LayerMaskMap);
+					Vector2 maskScale = m.GetTextureScale(LayerMaskMap), maskOffset = m.GetTextureOffset(LayerMaskMap);
+					d.layerMaskUv[0] = maskScale.x;
+					d.layerMaskUv[1] = maskScale.y;
+					d.layerMaskUv[2] = maskOffset.x;
+					d.layerMaskUv[3] = maskOffset.y;
+					for (int l = 0; l < layers - 1; ++l) {
+						Color c = Col(m, LayerBaseColor[l]);
+						d.layerColor[l * 4] = c.r;
+						d.layerColor[l * 4 + 1] = c.g;
+						d.layerColor[l * 4 + 2] = c.b;
+						d.layerColor[l * 4 + 3] = c.a;
+						Texture baseTex = Tex(m, LayerBaseColorMap[l]), maskTex = Tex(m, LayerMaskMapIds[l]);
+						r.layerTextures[1 + l * 3] = baseTex;
+						r.layerTextures[2 + l * 3] = Tex(m, LayerNormalMap[l]);
+						r.layerTextures[3 + l * 3] = maskTex;
+						d.layerParams[l * 4] = maskTex != null ? Float(m, LayerMetallicRemapMax[l], 1) : Float(m, LayerMetallic[l], 0);
+						d.layerParams[l * 4 + 1] = 1.0f - (maskTex != null ? Float(m, LayerSmoothnessRemapMax[l], 1) : Float(m, LayerSmoothness[l], 0.5f));
+						d.layerParams[l * 4 + 2] = Float(m, LayerNormalScale[l], 1);
+						d.layerParams[l * 4 + 3] = maskTex != null ? AeConst.MaskHdrp : 0;
+						Vector2 scale = m.HasProperty(LayerBaseColorMap[l]) ? m.GetTextureScale(LayerBaseColorMap[l]) : Vector2.one;
+						Vector2 offset = m.HasProperty(LayerBaseColorMap[l]) ? m.GetTextureOffset(LayerBaseColorMap[l]) : Vector2.zero;
+						d.layerUv[l * 4] = scale.x;
+						d.layerUv[l * 4 + 1] = scale.y;
+						d.layerUv[l * 4 + 2] = offset.x;
+						d.layerUv[l * 4 + 3] = offset.y;
+					}
+				}
+				SetColor(d.baseColor, Col(m, BaseColor0));
+				scratch_[AeConst.SlotBase] = Tex(m, BaseColorMap0);
+				scratch_[AeConst.SlotNormal] = Tex(m, NormalMap0);
+				scratch_[AeConst.SlotMask] = Tex(m, MaskMap0);
+				d.normalScale = Float(m, NormalScale0, 1);
+				if (scratch_[AeConst.SlotMask] != null) {
+					d.maskLayout = AeConst.MaskHdrp;
+					d.metallic = Float(m, MetallicRemapMax0, 1);
+					d.roughness = 1.0f - Float(m, SmoothnessRemapMax0, 1);
+				} else {
+					d.metallic = Float(m, Metallic0, 0);
+					d.roughness = 1.0f - Float(m, Smoothness0, 0.5f);
+				}
+				d.alphaCutoff = Float(m, AlphaCutoff, 0.5f);
+				uvProperty = BaseColorMap0;
 			} else if (m.HasProperty(BaseColorMap) && m.HasProperty(Metallic) && m.HasProperty(Smoothness)) {
 				// HDRP/Lit
 				cls = AeConst.ClassStandard;
@@ -331,6 +405,9 @@ namespace AetherGraphics {
 					bool used = false;
 					for (int i = 0; i < 5; ++i) {
 						used |= scratch_[i] == t;
+					}
+					foreach (Texture layer in r.layerTextures) {
+						used |= layer == t;
 					}
 					if (!used) {
 						++unmapped;

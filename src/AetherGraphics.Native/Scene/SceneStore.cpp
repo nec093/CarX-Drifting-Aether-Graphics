@@ -628,7 +628,20 @@ void SceneStore::PublishStats(uint64_t frame) {
 						{"width", it != textures_.end() ? it->second.desc.width : 0}, {"height", it != textures_.end() ? it->second.desc.height : 0}, {"dxgiFormat", it != textures_.end() ? int(it->second.format) : 0}});
 				}
 			}
-			report.push_back({{"material", h}, {"class", MaterialClassName(m.desc.materialClass)}, {"shaderId", m.desc.shaderId}, {"renderQueue", m.desc.renderQueue},
+			// HDRP/LayeredLit's extra layers: how many, and which of their textures are there and bound
+			json layers = json::object();
+			if (m.desc.layerCount > 1) {
+				static const char* layerSlots[10] = {"layerMask", "base1", "normal1", "mask1", "base2", "normal2", "mask2", "base3", "normal3", "mask3"};
+				json layerTextures = json::array();
+				for (uint32_t s = 0; s < 10; ++s) {
+					if (m.desc.layerTextures[s]) {
+						auto it = textures_.find(m.desc.layerTextures[s]);
+						layerTextures.push_back({{"slot", layerSlots[s]}, {"bound", it != textures_.end() && it->second.srv != UINT32_MAX}});
+					}
+				}
+				layers = {{"count", m.desc.layerCount}, {"vertexColor", m.desc.layerVertexColor}, {"textures", layerTextures}};
+			}
+			report.push_back({{"material", h}, {"class", MaterialClassName(m.desc.materialClass)}, {"shaderId", m.desc.shaderId}, {"renderQueue", m.desc.renderQueue}, {"layers", layers},
 				{"alphaTest", (m.desc.flags & kAeMaterialAlphaTest) != 0}, {"blend", (m.desc.flags & kAeMaterialBlend) != 0}, {"doubleSided", (m.desc.flags & kAeMaterialDoubleSided) != 0},
 				{"clearCoat", m.desc.clearCoat}, {"metallic", m.desc.metallic}, {"roughness", m.desc.roughness},
 				{"baseColor", {m.desc.baseColor[0], m.desc.baseColor[1], m.desc.baseColor[2], m.desc.baseColor[3]}},

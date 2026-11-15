@@ -67,6 +67,7 @@ static json ToJsonData(const SettingsData& d) {
 		{"moonlight", d.moonlight},
 		{"skinnedRayUpdates", d.skinnedRayUpdates},
 		{"tonemap", d.tonemap},
+		{"hostGrading", d.hostGrading},
 		{"reflectionDenoiser", d.reflectionDenoiser},
 		{"skyMode", d.skyMode},
 		{"timeOfDay", d.timeOfDay},
@@ -132,6 +133,7 @@ json Settings::Schema() {
 		{"particles", {{"type", "boolean"}, {"description", "Particles (the game's particle systems and tyre smoke)"}}},
 		{"ssr", {{"type", "boolean"}, {"description", "Screen space reflections (on where the game's volumes have them on; needs temporal antialiasing)"}}},
 		{"tonemap", oneOf(kTonemaps, "Tone mapping curve")},
+		{"hostGrading", {{"type", "boolean"}, {"description", "The game's own tone mapping and colour grading (its tone curve, post exposure and shadows / midtones / highlights, as its volumes set them). Off: none of them; tonemap host is drawn with AgX"}}},
 		{"reflectionDenoiser", oneOf(kReflectionDenoisers, "off, or nrd: the reflection rays sample each surface's GGX lobe (glossy reflections blur by roughness) and NVIDIA NRD (REBLUR_SPECULAR) denoises them; on by default. Needs DXR 1.1")},
 		{"skyMode", oneOf(kSkyModes, "Sky and sun: physical (Aether's atmosphere at timeOfDay) or scene (the scene's own sky texture and sun)")},
 		{"timeOfDay", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 24.0}, {"description", "Time of day in hours for the physical sky"}}},
@@ -271,6 +273,7 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 		return {};
 	}
 	if (key == "tonemap") return wantEnum(d.tonemap, kTonemaps);
+	if (key == "hostGrading") return wantBool(d.hostGrading);
 	if (key == "reflectionDenoiser") return wantEnum(d.reflectionDenoiser, kReflectionDenoisers);
 	if (key == "skyMode") return wantEnum(d.skyMode, kSkyModes);
 	if (key == "cloudCoverage" || key == "cloudSpeed") {

@@ -48,7 +48,28 @@ namespace AetherGraphics {
 			public Dictionary<IntPtr, uint> skinnedVariants;
 			public uint rayKey;                 // skinned: the handle its ray tracing tree is kept under (every vertex buffer variant is traced as this)
 			public bool rayIndicesSent, rayReading;
+			public StaticBatch batch;           // set: drawn as part of its static batch's instance (StaticBatch)
 		}
+
+		/// <summary>
+		/// The renderers Unity static-batched into one combined mesh, as one instance. A static-batched renderer draws only
+		/// its own sub meshes of the combined mesh (MeshRenderer.subMeshStartIndex on, one per material); sent one by one,
+		/// each was the whole combined mesh with its materials on the first sub meshes: the wrong parts were drawn, and for
+		/// rays every renderer was the whole mesh again with sub meshes skipped (traced triangle by triangle): on a kino map
+		/// with 624 such renderers, 44 M triangles for rays and 140 ms of GPU per frame. One instance per combined mesh, each
+		/// sub mesh with the material of the renderer it belongs to, draws the right parts and traces as a single opaque
+		/// mesh. Renderers in a LOD group stay on their own (with their materials on their own sub meshes): a batch would draw
+		/// every level at once.
+		/// </summary>
+		private sealed class StaticBatch {
+			public Mesh mesh;
+			public uint handle;     // the combined mesh's instance id (renderers' ids are of scene objects: no clash)
+			public readonly List<Tracked> members = new List<Tracked>();
+			public bool dirty = true;
+			public bool registered;
+		}
+
+		private readonly Dictionary<int, StaticBatch> batches_ = new Dictionary<int, StaticBatch>();
 
 		private sealed class TrackedMaterial {
 			public Material material;
@@ -158,6 +179,7 @@ namespace AetherGraphics {
 			particleTextures_.Clear();
 			renderers_.Clear();
 			order_.Clear();
+			batches_.Clear();
 			skinnedTracked_.Clear();
 			meshes_.Clear();
 			ResetGeometry();
@@ -266,6 +288,7 @@ namespace AetherGraphics {
 					if (t.registered) {
 						Native.Aether_SceneDestroy(AeConst.KindInstance, t.handle);
 					}
+					LeaveBatch(t);
 					renderers_.Remove(unchecked((int)t.handle));
 					order_.RemoveAt(i);
 					scanSetChanged_ = true;
@@ -283,6 +306,12 @@ namespace AetherGraphics {
 			if (scanSetChanged_ || lodGroups_.Count == 0 && Time.unscaledTime >= nextLodScan_) {
 				nextLodScan_ = Time.unscaledTime + 10.0f;
 				ScanLodGroups();
+				// a batched renderer found in a LOD group goes back on its own (a batch would draw all its levels at once)
+				foreach (Tracked t in order_) {
+					if (t.batch != null && t.lodGroup >= 0) {
+						Place(t);
+					}
+				}
 			}
 			SkinnedSkipped = skinnedWaiting; // not drawn (yet): Unity has no GPU-skinned buffer for them, or the mesh cannot be described
 		}
@@ -552,7 +581,40 @@ namespace AetherGraphics {
 					RegisterMaterial(m, handle, own ? t.renderer : null, i);
 				}
 			}
+			Place(t);
+		}
+
+		/// <summary>Sends a renderer as an instance of its own, or puts it into its static batch's instance.</summary>
+		private void Place(Tracked t) {
+			bool batchable = t.skinned == null && t.lodGroup < 0 && t.renderer is MeshRenderer mr && mr.isPartOfStaticBatch && t.mesh != null;
+			if (batchable) {
+				if (t.registered) {
+					Native.Aether_SceneDestroy(AeConst.KindInstance, t.handle);
+					t.registered = false;
+				}
+				int key = t.mesh.GetInstanceID();
+				if (!batches_.TryGetValue(key, out StaticBatch b)) {
+					b = new StaticBatch { mesh = t.mesh, handle = unchecked((uint)key) };
+					batches_[key] = b;
+				}
+				if (t.batch != b) {
+					LeaveBatch(t);
+					b.members.Add(t);
+					t.batch = b;
+				}
+				b.dirty = true;
+				return;
+			}
+			LeaveBatch(t);
 			BindInstance(t);
+		}
+
+		private static void LeaveBatch(Tracked t) {
+			if (t.batch != null) {
+				t.batch.members.Remove(t);
+				t.batch.dirty = true;
+				t.batch = null;
+			}
 		}
 
 		/// <summary>Sends the instance: its mesh, its materials, its flags.</summary>
@@ -563,12 +625,71 @@ namespace AetherGraphics {
 			d.mesh = t.meshHandle;
 			d.flags = (t.renderer.shadowCastingMode != ShadowCastingMode.Off ? AeConst.InstanceCastShadows : 0) | (t.renderer.receiveShadows ? AeConst.InstanceReceiveShadows : 0) | (t.isStatic ? AeConst.InstanceStatic : 0);
 			d.layer = (uint)t.renderer.gameObject.layer;
-			d.materialCount = (uint)t.materials.Length;
 			d.renderingLayerMask = t.renderer.renderingLayerMask;
-			fixed (uint* p = t.materials) {
+			uint[] materials = t.materials;
+			// a static-batched renderer on its own (in a LOD group): its materials belong to its own sub meshes of the
+			// combined mesh, the ones before stay without (not drawn, not there for rays)
+			if (t.renderer is MeshRenderer mr && mr.isPartOfStaticBatch && mr.subMeshStartIndex > 0) {
+				materials = new uint[mr.subMeshStartIndex + t.materials.Length];
+				Array.Copy(t.materials, 0, materials, mr.subMeshStartIndex, t.materials.Length);
+			}
+			d.materialCount = (uint)materials.Length;
+			fixed (uint* p = materials) {
 				t.registered = Native.Aether_SceneUpsertInstance(&d, p) != 0;
 			}
 		}
+
+		/// <summary>The static batches whose renderers changed: sent again (each sub mesh with its renderer's material).</summary>
+		private unsafe void RebuildBatches() {
+			List<int> gone = null;
+			foreach (var kv in batches_) {
+				StaticBatch b = kv.Value;
+				if (!b.dirty) {
+					continue;
+				}
+				b.dirty = false;
+				b.members.RemoveAll(m => m.renderer == null || m.batch != b);
+				if (b.members.Count == 0 || b.mesh == null) {
+					if (b.registered) {
+						Native.Aether_SceneDestroy(AeConst.KindInstance, b.handle);
+						b.registered = false;
+					}
+					(gone ??= new List<int>()).Add(kv.Key);
+					continue;
+				}
+				int subMeshes = b.mesh.subMeshCount;
+				var materials = new uint[subMeshes];
+				bool casts = false, receives = false;
+				foreach (Tracked m in b.members) {
+					var mr = (MeshRenderer)m.renderer;
+					int start = mr.subMeshStartIndex;
+					for (int i = 0; i < m.materials.Length && start + i < subMeshes; ++i) {
+						materials[start + i] = m.materials[i];
+					}
+					casts |= mr.shadowCastingMode != ShadowCastingMode.Off;
+					receives |= mr.receiveShadows;
+				}
+				Tracked first = b.members[0];
+				AeInstanceDesc d = default;
+				d.structSize = (uint)sizeof(AeInstanceDesc);
+				d.instance = b.handle;
+				d.mesh = first.meshHandle;
+				d.flags = (casts ? AeConst.InstanceCastShadows : 0) | (receives ? AeConst.InstanceReceiveShadows : 0) | AeConst.InstanceStatic;
+				d.layer = (uint)first.renderer.gameObject.layer;
+				d.renderingLayerMask = first.renderer.renderingLayerMask;
+				d.materialCount = (uint)subMeshes;
+				fixed (uint* p = materials) {
+					b.registered = Native.Aether_SceneUpsertInstance(&d, p) != 0;
+				}
+			}
+			if (gone != null) {
+				foreach (int key in gone) {
+					batches_.Remove(key);
+				}
+			}
+		}
+
+		public int StaticBatchCount => batches_.Count;
 
 		/// <summary>
 		/// Every frame, for the skinned renderers the camera sees: Unity has skinned this frame into one of the renderer's
@@ -601,6 +722,15 @@ namespace AetherGraphics {
 					}
 				}
 			}
+			for (int i = 0; i < 10; ++i) {
+				Texture tex = result.layerTextures[i]; // (HDRP/LayeredLit's layers)
+				if (tex != null) {
+					result.desc.layerTextures[i] = Handle(tex);
+					if (!textures_.ContainsKey(Handle(tex))) {
+						QueueTexture(tex);
+					}
+				}
+			}
 			AeMaterialDesc d = result.desc;
 			uint signature = 2166136261u;
 			byte* bytes = (byte*)&d;
@@ -613,9 +743,12 @@ namespace AetherGraphics {
 				return; // nothing changed
 			}
 			Native.Aether_SceneUpsertMaterial(&d);
-			var textures = new uint[5];
+			var textures = new uint[15]; // (the five slots, then the layers': what keeps a texture alive in the sweep)
 			for (int i = 0; i < 5; ++i) {
 				textures[i] = d.textures[i];
+			}
+			for (int i = 0; i < 10; ++i) {
+				textures[5 + i] = d.layerTextures[i];
 			}
 			materials_[handle] = new TrackedMaterial { material = m, crc = crc, owner = owner, index = index, signature = signature, textures = textures };
 		}
@@ -1811,9 +1944,10 @@ namespace AetherGraphics {
 			// ---- particles (sent before the frame they belong to)
 			particles_.Submit(camera, particleTexture_);
 
-			// ---- one entry per registered renderer
-			if (frameInstances_.Length < order_.Count) {
-				frameInstances_ = new AeFrameInstance[Mathf.NextPowerOfTwo(order_.Count)];
+			// ---- one entry per registered renderer, one per static batch
+			RebuildBatches();
+			if (frameInstances_.Length < order_.Count + batches_.Count) {
+				frameInstances_ = new AeFrameInstance[Mathf.NextPowerOfTwo(order_.Count + batches_.Count)];
 			}
 			int count = 0;
 			int cullingMask = camera != null ? camera.cullingMask : ~0;
@@ -1860,6 +1994,29 @@ namespace AetherGraphics {
 					}
 					fi->flags = flags;
 					*(Matrix4x4*)fi->localToWorld = t.skinned != null ? SkinnedMatrix(t.skinned) : !t.live ? t.matrix : r.localToWorldMatrix;
+				}
+				// the static batches: drawn while any of their renderers is (the native side culls the combined mesh against
+				// the view and the shadow cascades itself)
+				foreach (StaticBatch b in batches_.Values) {
+					if (!b.registered) {
+						continue;
+					}
+					bool anyEnabled = false, inCamera = false, casts = false;
+					foreach (Tracked m in b.members) {
+						if (m.renderer == null || !m.enabled) {
+							continue;
+						}
+						anyEnabled = true;
+						inCamera |= (m.layerBit & cullingMask) != 0 && m.casting != ShadowCastingMode.ShadowsOnly;
+						casts |= m.casting != ShadowCastingMode.Off && (m.layerBit & sunMask) != 0;
+					}
+					if (!anyEnabled || (!inCamera && !casts)) {
+						continue;
+					}
+					AeFrameInstance* fi = instances + count++;
+					fi->instance = b.handle;
+					fi->flags = AeConst.FrameInstanceVisible | (inCamera ? 0u : AeConst.FrameInstanceShadowOnly);
+					*(Matrix4x4*)fi->localToWorld = b.members[0].matrix;
 				}
 
 				OffscreenCasters = offscreen;

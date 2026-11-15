@@ -1,10 +1,10 @@
-# Scene Data Contract（版 7）
+# Scene Data Contract（版 8）
 
 マネージド側（Unity、`src/AetherGraphics.Managed/SceneCapture`）と Aether のネイティブレンダラー（`src/AetherGraphics.Native/Scene/SceneStore`、レイトレース用の形状は `Renderer/Bvh`）の間の取り決め。
 
 - 構造体の配置は `src/AetherGraphics.Native/include/SceneContract.h`。`SceneCapture/Contract.cs` がフィールド単位で同じ配置を持つ。
 - 関数は `src/AetherGraphics.Native/include/AetherApi.h`（API 版 8、`AETHER_API_VERSION` と `Native.ApiVersion`）。
-- 契約の版は `AE_SCENE_CONTRACT_VERSION`（ネイティブ）と `AeConst.ContractVersion`（マネージド）。現在はどちらも 7。
+- 契約の版は `AE_SCENE_CONTRACT_VERSION`（ネイティブ）と `AeConst.ContractVersion`（マネージド）。現在はどちらも 8（8 で材質に HDRP/LayeredLit の層を足した：`layerCount`、`layerVertexColor`、`layerTextures`、`layerMaskUv`、`layerColor`、`layerParams`、`layerUv`。[material-translation.md](material-translation.md) の「HDRP/LayeredLit」）。
 
 ## 規則
 

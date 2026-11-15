@@ -342,6 +342,11 @@ static const float3 kClassColors[14] = {
 
 // surface: what the reflection pass needs to know about an opaque surface (the opaque pass's second target):
 // xy the normal (octahedral), z the roughness of the lobe that mirrors, w how much of the mirrored light it returns.
+// A texture of a material's extra layers (HDRP/LayeredLit), by its place in the SRV heap; `none` where it has none.
+float4 LayerTexture(uint index, float2 uv, float4 none) {
+	return index == 0xFFFFFFFFu ? none : g_SceneTextures[NonUniformResourceIndex(index)].Sample(s_Aniso, uv);
+}
+
 float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	surface = 0.0;
 	MaterialData mat = g_Materials[g_MaterialIndex];
@@ -388,6 +393,67 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 			s.metallic *= m.g;
 			s.occlusion = lerp(1.0, m.b, mat.params.w);
 		}
+	}
+
+	// ---- HDRP/LayeredLit: layers 1 .. 3 over the one above, weighted as HDRP does (ComputeMaskWeights): the layer
+	// mask's A for layer 0, R G B for layers 1 2 3, the top layer first, each taking what the ones above left
+	float3 layerTangentNormal = float3(0.0, 0.0, 1.0);
+	const bool layered = mat.layerInfo.x > 1.5;
+	if (layered) {
+		// the mesh's own uv back from layer 0's (the vertex shader applied its scale and offset)
+		float2 scale0 = mat.uvScaleOffset.xy;
+		scale0 = float2(abs(scale0.x) < 1e-6 ? 1.0 : scale0.x, abs(scale0.y) < 1e-6 ? 1.0 : scale0.y);
+		const float2 meshUv = (input.uv - mat.uvScaleOffset.zw) / scale0;
+		float4 masks = LayerTexture(mat.layerTex[0].x, meshUv * mat.layerMaskUv.xy + mat.layerMaskUv.zw, float4(1.0, 1.0, 1.0, 1.0));
+		if (mat.layerInfo.y > 1.5) {
+			masks = saturate(masks + input.color * 2.0 - 1.0);
+		} else if (mat.layerInfo.y > 0.5) {
+			masks *= saturate(input.color);
+		}
+		const int count = (int)mat.layerInfo.x;
+		float layerMask[4] = {masks.a, masks.r, masks.g, masks.b};
+		float weights[4] = {0.0, 0.0, 0.0, 0.0};
+		float taken = 0.0;
+		[unroll] for (int w = 3; w >= 0; --w) {
+			if (w < count) {
+				weights[w] = min(layerMask[w], 1.0 - taken);
+				taken = saturate(taken + layerMask[w]);
+			}
+		}
+		// layer 0 is what is above (its normal is read further down)
+		float3 n0 = mat.params3.z > 0.5 ? UnpackNormal(g_NormalMap.Sample(s_Aniso, input.uv), mat.params.y) : float3(0.0, 0.0, 1.0);
+		float3 albedo = s.albedo * weights[0], normal = n0 * weights[0];
+		float metallic = s.metallic * weights[0], roughness = s.roughness * weights[0], occlusion = s.occlusion * weights[0];
+		[unroll] for (int l = 0; l < 3; ++l) {
+			if (l + 1 >= count || weights[l + 1] <= 0.0) {
+				continue;
+			}
+			const float wl = weights[l + 1];
+			const float2 uvL = meshUv * mat.layerUv[l].xy + mat.layerUv[l].zw;
+			const uint baseIndex = l == 0 ? mat.layerTex[0].y : l == 1 ? mat.layerTex[1].x : mat.layerTex[1].w;
+			const uint normalIndex = l == 0 ? mat.layerTex[0].z : l == 1 ? mat.layerTex[1].y : mat.layerTex[2].x;
+			const uint maskIndex = l == 0 ? mat.layerTex[0].w : l == 1 ? mat.layerTex[1].z : mat.layerTex[2].y;
+			float3 a = LayerTexture(baseIndex, uvL, float4(1.0, 1.0, 1.0, 1.0)).rgb * mat.layerColor[l].rgb;
+			float m = mat.layerParams[l].x, r = mat.layerParams[l].y, o = 1.0;
+			if (maskIndex != 0xFFFFFFFFu && mat.layerParams[l].w > 0.5) {
+				float4 mm = LayerTexture(maskIndex, uvL, float4(1.0, 1.0, 1.0, 1.0));
+				m *= mm.r;
+				r = 1.0 - (1.0 - r) * mm.a;
+				o = lerp(1.0, mm.g, mat.params.w);
+			}
+			float3 nl = normalIndex != 0xFFFFFFFFu ? UnpackNormal(LayerTexture(normalIndex, uvL, float4(0.5, 0.5, 1.0, 1.0)), mat.layerParams[l].z) : float3(0.0, 0.0, 1.0);
+			albedo += a * wl;
+			metallic += m * wl;
+			roughness += r * wl;
+			occlusion += o * wl;
+			normal += nl * wl;
+		}
+		const float total = max(weights[0] + weights[1] + weights[2] + weights[3], 1e-4);
+		s.albedo = albedo / total;
+		s.metallic = metallic / total;
+		s.roughness = roughness / total;
+		s.occlusion = occlusion / total;
+		layerTangentNormal = normalize(normal / total);
 	}
 
 	// ---- class specific surface inputs
@@ -454,10 +520,10 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 
 	// ---- normal
 	float3 N = normalize(input.normal);
-	if (mat.params3.z > 0.5) {
+	if (mat.params3.z > 0.5 || layered) {
 		float3 T = normalize(input.tangent.xyz - N * dot(N, input.tangent.xyz));
 		float3 B = cross(N, T) * input.tangent.w;
-		float3 n = UnpackNormal(g_NormalMap.Sample(s_Aniso, input.uv), mat.params.y);
+		float3 n = layered ? layerTangentNormal : UnpackNormal(g_NormalMap.Sample(s_Aniso, input.uv), mat.params.y);
 		N = normalize(T * n.x + B * n.y + N * n.z);
 	}
 	if (!outside) {

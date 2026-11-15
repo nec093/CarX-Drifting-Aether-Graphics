@@ -184,6 +184,13 @@ struct MaterialData {
 	float params2[4];
 	float uvScaleOffset[4];
 	float params3[4];
+	// HDRP/LayeredLit: layers 1 .. 3 over layer 0 (the fields above), their textures read through g_SceneTextures
+	float layerInfo[4];      // x layer count (1: none), y the vertex colour with the mask (0 not, 1 multiplied, 2 added)
+	float layerMaskUv[4];    // scale xy, offset zw of the mesh's uv
+	uint32_t layerTex[12];   // heap indices (UINT32_MAX = none): mask, then per layer base, normal, mask
+	float layerColor[3][4];
+	float layerParams[3][4]; // metallic, roughness, normal scale, mask layout
+	float layerUv[3][4];     // scale xy, offset zw of the mesh's uv
 };
 
 struct LightData {
@@ -832,6 +839,19 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 					md.params3[1] = m.textures[kAeSlotMask] && m.maskLayout != kAeMaskNone ? 1.0f : 0.0f;
 					md.params3[2] = m.textures[kAeSlotNormal] ? 1.0f : 0.0f;
 					md.params3[3] = m.textures[kAeSlotExtra] ? 1.0f : 0.0f;
+					md.layerInfo[0] = m.layerCount > 1 ? float(std::min<uint32_t>(m.layerCount, 4u)) : 1.0f;
+					md.layerInfo[1] = float(m.layerVertexColor);
+					memcpy(md.layerMaskUv, m.layerMaskUv, sizeof(md.layerMaskUv));
+					memcpy(md.layerColor, m.layerColor, sizeof(md.layerColor));
+					memcpy(md.layerParams, m.layerParams, sizeof(md.layerParams));
+					memcpy(md.layerUv, m.layerUv, sizeof(md.layerUv));
+					for (uint32_t i = 0; i < 12; ++i) {
+						SceneTexture* t = i < 10 && m.layerTextures[i] ? store.Texture(m.layerTextures[i]) : nullptr;
+						md.layerTex[i] = t && t->srv != UINT32_MAX && t->desc.dimension == kAeTexture2D ? t->srv : UINT32_MAX;
+						if (t) {
+							t->lastUsedFrame = frame;
+						}
+					}
 					material->frameIndex = materialCount_++;
 					material->frameStamp = frame;
 					materialData_.resize(size_t(materialCount_) * sizeof(MaterialData));
@@ -1541,6 +1561,9 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 	memcpy(fc.smh[1], f.smhMidtones, sizeof(f.smhMidtones));
 	memcpy(fc.smh[2], f.smhHighlights, sizeof(f.smhHighlights));
 	memcpy(fc.smhLimits, f.smhLimits, sizeof(f.smhLimits));
+	if (!settings.hostGrading) {
+		memset(fc.smhLimits, 0, sizeof(fc.smhLimits)); // (all limits 0: no shadows / midtones / highlights grading)
+	}
 	fc.cameraPos[0] = f.cameraPosition[0];
 	fc.cameraPos[1] = f.cameraPosition[1];
 	fc.cameraPos[2] = f.cameraPosition[2];
@@ -1588,10 +1611,13 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 	}
 	// (Night is exposed darker than the meter asks: metered to the usual middle grey a moonlit yard looked like an
 	// overcast afternoon. 1.2 stops under, tried against 2.2: dark, with the lamps as the bright things in it.)
-	fc.exposure[2] = std::pow(2.0f, settings.exposureEV + f.postExposure);
-	// tone mapping: 0 none, 1 ACES, 2 neutral, 3 the host's custom curve
+	// (the game's post exposure is part of its colour grading: left out with hostGrading off)
+	fc.exposure[2] = std::pow(2.0f, settings.exposureEV + (settings.hostGrading ? f.postExposure : 0.0f));
+	// tone mapping: 0 none, 1 ACES, 2 neutral, 3 the host's custom curve, 4 AgX
 	float tone = settings.tonemap == "aces" ? 1.0f : settings.tonemap == "neutral" ? 2.0f : settings.tonemap == "agx" ? 4.0f : 0.0f;
-	if (settings.tonemap == "host") {
+	if (settings.tonemap == "host" && !settings.hostGrading) {
+		tone = 4.0f; // the game's curve is off: Aether's own (AgX)
+	} else if (settings.tonemap == "host") {
 		switch (f.tonemapMode) {
 		case kAeTonemapNone: tone = 0.0f; break;
 		case kAeTonemapNeutral: tone = 2.0f; break;

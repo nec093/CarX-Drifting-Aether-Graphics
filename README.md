@@ -5,7 +5,7 @@ CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1）向けの
 
 - 描画 API は **DirectX 12 のみ**（DX11 / Vulkan のバックエンドもフォールバックもありません）。
 - NVIDIA / AMD / Intel 共通の経路を基本とし、ベンダー固有機能は実行時判定のオプションにします。
-- Mod ローダーは BepInEx 5 です（KSL 用の入口もあります）。kino には依存しません。ゲーム内 GUI は Dear ImGui。AI エージェントとは MCP で連携します。
+- Aether Mod として、Aether Loader（BepInEx 5 のプラグイン、別リポジトリ `CarX-Drifting-Aether-Loader`）が読み込みます。BepInEx に直接読み込ませる入口と、KSL 用の入口もあります。kino には依存しません。ゲーム内 GUI は Dear ImGui。AI エージェントとは MCP で連携します。
 - ゲームのロジック、物理、シーン管理、入力はそのままです。Aether が受け持つのは描画と計測・診断です。
 
 ## できること
@@ -29,7 +29,7 @@ CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1）向けの
 
 ```
 src/AetherGraphics.Managed/   C# の Mod（net472）
-  Loaders/            BepInEx / KSL の入口
+  Loaders/            Aether Loader / BepInEx / KSL の入口
   Pipeline/           Unity のレンダーパイプライン（AetherPipeline）
   SceneCapture/       シーンの読み取り（メッシュ、マテリアル、ライト、パーティクル、タイヤスモーク）
   GameIntegration/    ゲーム固有の対応（DX12 の回避策、品質設定、昼夜）
@@ -68,7 +68,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch-game.ps1     
 - ゲームは **`-force-d3d12`** で起動します（Steam の起動オプション、または `scripts\launch-game.ps1`）。DX11 で起動した場合、Aether は何もせずその旨をログに出します。
 - **F10** でオーバーレイを開閉します。
 - **F11** でフリーカメラに入ります（UI を隠す。WASD で移動、マウスで見回し、ホイールで画角。その間はパストレーシング）。
-- ログ・キャプチャ・ベンチマーク結果は `<ゲーム>\BepInEx\plugins\AetherGraphics\`（`logs\aether.jsonl`、`captures\`、`benchmarks\`）、設定は `<ゲーム>\BepInEx\config\AetherGraphics\aether.json`。
+- ログ・キャプチャ・ベンチマーク結果は `<ゲーム>\AetherLoader\mods\AetherGraphics\`（`logs\aether.jsonl`、`captures\`、`benchmarks\`）、設定は `<ゲーム>\AetherLoader\config\nec093.aether.graphics\aether.json`。
 
 ## AI 連携（MCP）
 

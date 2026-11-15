@@ -2,12 +2,12 @@
 
 ## まず見る場所
 
-パスはゲームのフォルダーからの相対です。BepInEx（既定のローダー）の場合を書き、KSL の場合を括弧に書きます。
+パスはゲームのフォルダーからの相対です。Aether Loader（既定のローダー）の場合を書き、BepInEx に直接読み込ませた場合を括弧に書きます。
 
 | 場所 | 内容 |
 |---|---|
 | `BepInEx\LogOutput.log`（KSL：`kino\output.log`） | ローダーのログ。Aether が読み込まれたか、C# 側の `[Aether Graphics]` の行 |
-| `BepInEx\plugins\AetherGraphics\logs\aether.jsonl`（KSL：`kino\mods\AetherGraphics\logs\`） | Aether の構造化ログ（1 行 1 JSON）。前回分は `aether.prev.jsonl` |
+| `AetherLoader\mods\AetherGraphics\logs\aether.jsonl`（BepInEx：`BepInEx\plugins\AetherGraphics\logs\`） | Aether の構造化ログ（1 行 1 JSON）。前回分は `aether.prev.jsonl` |
 | 同じフォルダーの `crash-current.json` / `crash-previous.json` | Aether が検出した障害のレポート |
 | `%USERPROFILE%\AppData\LocalLow\CarX Technologies\Drift Racing Online\Player.log` | Unity のログ（例外、グラフィックス API） |
 | `%LOCALAPPDATA%\Temp\CarX Technologies\Drift Racing Online\Crashes\` | Unity のクラッシュダンプ。例外コード `0x87D` は、D3D12 デバッグレイヤーが破損を検出して投げた例外 |
@@ -52,7 +52,7 @@ D3D12 デバッグレイヤーのメッセージは `Player.log` には出ませ
 
 ## DX12 で Aether が止めているゲームの機能
 
-DX12 でそのままでは壊れるゲームの機能を、Aether が止めています。設定フォルダー（BepInEx なら `BepInEx\config\AetherGraphics\`）にファイルを置くと動作を変えられます。
+DX12 でそのままでは壊れるゲームの機能を、Aether が止めています。設定フォルダー（Aether Loader なら `AetherLoader\config\nec093.aether.graphics\`）にファイルを置くと動作を変えられます。
 
 | 対象 | 既定の動作 | 変えるファイル | 状態の表示 |
 |---|---|---|---|
@@ -69,7 +69,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Remove  
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Remove -Loader Ksl # KSL
 ```
 
-ゲームを閉じてから実行します。そのローダーの Aether のフォルダー（BepInEx：`BepInEx\plugins\AetherGraphics\`、KSL：`kino\mods\AetherGraphics\` と `kino\mods\AetherGraphics.ksm` / `AetherGraphics.dll`）と、`<Game>_Data\Plugins\x86_64\AetherGraphicsNative.dll` を消します。
+ゲームを閉じてから実行します。そのローダーの Aether のフォルダー（Aether Loader：`AetherLoader\mods\AetherGraphics\`、BepInEx：`BepInEx\plugins\AetherGraphics\`、KSL：`kino\mods\AetherGraphics\` と `kino\mods\AetherGraphics.ksm` / `AetherGraphics.dll`）と、`<Game>_Data\Plugins\x86_64\AetherGraphicsNative.dll` を消します。
 設定フォルダーは残ります。BepInEx 自体も残ります。
 
 ## ほかの Mod との関係

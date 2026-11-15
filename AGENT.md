@@ -13,7 +13,7 @@
   - C# の名前空間は `AetherGraphics`（`Aether.Graphics` にしない：Unity の `Graphics` クラスが名前空間に隠れる）。
   - BepInEx の ID は `nec093.aether.graphics`、パイプは `\\.\pipe\AetherGraphics.Runtime`、配置先と設定は `AetherGraphics` のフォルダー。
   - C++ の名前空間 `aether`、C API の `Aether_*`、`AetherCore` などの型名は Mod の内部の名前として残している。
-- CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1、HDRP 16、64-bit）向けの Mod。ローダーは BepInEx 5 が既定（KSL 用の入口も残してある。`docs/development/build.md` の「ローダー」）。kino には依存しない。KSL 1.0.14 は BepInEx を消し、ホワイトリストに無い BepInEx の Mod を BAN するので、この環境では KSL を無効にしている（`winhttp.dll.aether-off`）。C# のコア（`AetherCore`）はローダーの型を参照しない。ローダーに求めるものは `IAetherHost` に足す。描画は HDRP に頼らない Aether 自身の DX12 レンダラーが行う。
+- CarX Drift Racing Online（moddable ブランチ、Unity 2023.2.22f1、HDRP 16、64-bit）向けの Mod。ローダーは Aether Loader が既定（Aether Mod `nec093.aether.graphics`。BepInEx 直接と KSL の入口も残してある。`docs/development/build.md` の「ローダー」）。Aether Loader から受け取るものは `Loaders/AetherLoader/` だけで扱い、コアに `Aether.API` を参照させない。kino には依存しない。KSL 1.0.14 は BepInEx を消し、ホワイトリストに無い BepInEx の Mod を BAN するので、この環境では KSL を無効にしている（`winhttp.dll.aether-off`）。C# のコア（`AetherCore`）はローダーの型を参照しない。ローダーに求めるものは `IAetherHost` に足す。描画は HDRP に頼らない Aether 自身の DX12 レンダラーが行う。
 - **DirectX 12 のみ。** DX11 / Vulkan のバックエンド、フォールバック、複数 API 向けの抽象化は作らない。機能の有無は GPU ごとに実行時判定し、無い機能だけを切る。
 - NVIDIA / AMD / Intel の共通経路を基本にする。ベンダー固有機能はオプション。
 - Unity のゲームロジック、物理、シーン管理、入力は維持する。Aether が受け持つのは描画と計測・診断。
@@ -90,7 +90,7 @@
 - KSL は生の `.dll` の Mod を読み込まない。署名済みの `.ksm` が必要。
 - maykr の署名は KSL のサーバーに問い合わせる。続けて要求すると `Build request denied` になることがある（待って再実行）。不要な Release ビルドを繰り返さない。
 - KSL は `kino\mods\<フォルダー>\` 直下の `.dll` をすべて Mod 候補として調べる。ネイティブ DLL は `kino\mods\AetherGraphics\native\` に置く。
-- `IUnityInterfaces` は Unity のプラグインローダー経由（`<Game>_Data\Plugins\x86_64\`）でしか受け取れない前提で実装している。`LoadLibrary` だけで `UnityPluginLoad` が呼ばれるかは未確認（`kino\config\AetherGraphics\dev-preload` で試せる）。
+- `IUnityInterfaces` は Unity のプラグインローダー経由（`<Game>_Data\Plugins\x86_64\`）でしか受け取れない前提で実装している。`LoadLibrary` だけで `UnityPluginLoad` が呼ばれるかは未確認（設定フォルダーの `dev-preload` で試せる）。
 - **DX12 では、ゲームの HDRP は単体では構築できない**（`Kernel 'KDepthDownsample8DualUav' not found`。HDRP のコンピュートシェーダーに DX12 のカーネルが無い）。`HdrpDx12Fix` とバンドルで補う。
 - HDRP が動くようになった後、ゲーム独自の HDRP カスタムパス 2 つ（`GpuCulling.GpuCullingPass`、`ParticleRenderPass`）も DX12 のカーネルが無く、毎フレーム例外でフレームの残りを止める。`GameDx12Workarounds` が無効化する（ソースが無いので作り直せない）。
 - HDRP のバンドルを作るとき、HDRP のビルド時ストリッパーは HDRP アセットが無いと全カーネルを除去する。バリアントは全組み合わせを作らない（`Deferred` だけで 6,696、36 並列で 35 分以上）。ゲームの設定（`unity/hdrp-game-settings.json`）の組み合わせだけをビルドする（518 バリアント、数分）。
@@ -124,11 +124,11 @@
 | もの | 場所 |
 |---|---|
 | ログ（KSL） | `<ゲーム>\kino\output.log` |
-| ログ（Aether） | `<ゲーム>\BepInEx\plugins\AetherGraphics\logs\aether.jsonl`（KSL のときは `kino\mods\AetherGraphics\logs\`） |
+| ログ（Aether） | `<ゲーム>\AetherLoader\mods\AetherGraphics\logs\aether.jsonl`（BepInEx 直接のときは `BepInEx\plugins\AetherGraphics\logs\`） |
 | ログ（BepInEx） | `<ゲーム>\BepInEx\LogOutput.log` |
 | ログ（Unity） | `%USERPROFILE%\AppData\LocalLow\CarX Technologies\Drift Racing Online\Player.log` |
-| キャプチャ、ベンチマーク | `<ゲーム>\BepInEx\plugins\AetherGraphics\captures\`、`benchmarks\` |
-| 設定 | `<ゲーム>\BepInEx\config\AetherGraphics\aether.json`（KSL のときは `kino\config\AetherGraphics\`） |
+| キャプチャ、ベンチマーク | `<ゲーム>\AetherLoader\mods\AetherGraphics\captures\`、`benchmarks\` |
+| 設定 | `<ゲーム>\AetherLoader\config\nec093.aether.graphics\aether.json`（BepInEx 直接のときは `BepInEx\config\AetherGraphics\`） |
 | Unity のビルド用プロジェクト | `%USERPROFILE%\Aether-Unity`（ログは `Logs\aether_build.log`） |
-| 開発用のファイル（`dev-camera.txt`、`dev-smoke.txt`） | `<ゲーム>\BepInEx\config\AetherGraphics\` |
+| 開発用のファイル（`dev-camera.txt`、`dev-smoke.txt`） | `<ゲーム>\AetherLoader\config\nec093.aether.graphics\` |
 | Unity Native Plugin API のヘッダー | `C:\Program Files\Unity\Hub\Editor\2023.2.20f1\Editor\Data\PluginAPI` |

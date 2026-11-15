@@ -73,6 +73,14 @@ namespace AetherGraphics {
 		public fixed float uvScale[2];
 		public fixed float uvOffset[2];
 		public fixed uint textures[5];
+		// HDRP/LayeredLit (contract 8): see SceneContract.h
+		public uint layerCount;
+		public uint layerVertexColor;
+		public fixed uint layerTextures[10];
+		public fixed float layerMaskUv[4];
+		public fixed float layerColor[12];
+		public fixed float layerParams[12];
+		public fixed float layerUv[12];
 		public fixed uint reserved[3];
 	}
 
@@ -199,7 +207,7 @@ namespace AetherGraphics {
 	}
 
 	internal static class AeConst {
-		public const int ContractVersion = 7;
+		public const int ContractVersion = 8;
 
 		public const byte SemanticPosition = 0, SemanticNormal = 1, SemanticTangent = 2, SemanticColor = 3, SemanticTexCoord0 = 4, SemanticTexCoord1 = 5;
 		public const uint Texture2D = 0, TextureCube = 1, TextureCubeArray = 2, Texture2DArray = 3, Texture3D = 4;

@@ -89,13 +89,13 @@ namespace AetherGraphics {
 		/// <summary>
 		/// Makes sure Unity itself loads AetherGraphicsNative.dll, so that Unity calls UnityPluginLoad on it (the only way to
 		/// IUnityGraphicsD3D12v7). Unity's plugin loader looks in [Game]_Data/Plugins/x86_64: the DLL shipped in
-		/// kino/mods/AetherGraphics/native is copied there when it is missing or different. Must run before the first P/Invoke.
-		/// With the file kino/config/AetherGraphics/dev-preload present the DLL is loaded from kino/mods/AetherGraphics/native with LoadLibrary
+		/// the mod's native folder (DataDir\native) is copied there when it is missing or different. Must run before the first P/Invoke.
+		/// With the file dev-preload in the config folder the DLL is loaded from DataDir\native with LoadLibrary
 		/// instead (a development experiment: tells whether Unity also calls UnityPluginLoad then).
 		/// Returns null on success, else what went wrong.
 		/// </summary>
 		public static string Prepare(string modDataDir, string configDir, string gameRoot) {
-			// in a sub-folder: KSL examines every .dll directly inside kino/mods/<folder> as a possible mod
+			// in a sub-folder: the loaders examine the .dll files directly inside the mod's folder as possible mods / assemblies
 			string source = Path.Combine(modDataDir, "native", Dll + ".dll");
 			if (!File.Exists(source)) {
 				return "missing " + source;
@@ -104,7 +104,7 @@ namespace AetherGraphics {
 				if (LoadLibraryW(source) == IntPtr.Zero) {
 					return "LoadLibrary failed for " + source + " (error " + Marshal.GetLastWin32Error() + ")";
 				}
-				LoadStrategy = "preload (LoadLibrary from kino/mods/AetherGraphics/native)";
+				LoadStrategy = "preload (LoadLibrary from " + Path.GetDirectoryName(source) + ")";
 				return null;
 			}
 			string dataFolder = null;

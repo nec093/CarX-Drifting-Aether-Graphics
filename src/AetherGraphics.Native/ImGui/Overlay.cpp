@@ -930,6 +930,13 @@ void SettingsTab() {
 	if (ImGui::Combo("Tone mapping", &tonemap, tonemapText, 5)) {
 		settings.Set("tonemap", tonemaps[tonemap], "overlay");
 	}
+	bool hostGrading = s.hostGrading;
+	if (ImGui::Checkbox("The game's tone mapping and colour grading", &hostGrading)) {
+		settings.Set("hostGrading", hostGrading, "overlay");
+	}
+	if (!s.hostGrading) {
+		ImGui::TextDisabled(s.tonemap == "host" ? "Off: no game curve or grading; the scene's curve is drawn with AgX." : "Off: no game curve or grading.");
+	}
 	struct Toggle { const char* key; const char* label; bool value; };
 	Toggle toggles[] = {
 		{"antialiasing", "Antialiasing (temporal)", s.antialiasing}, {"shadows", "Sun shadows", s.shadows}, {"ssao", "Ambient occlusion", s.ssao},

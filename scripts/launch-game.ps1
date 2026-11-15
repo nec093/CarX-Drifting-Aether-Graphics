@@ -42,5 +42,5 @@ while ((Get-Date) -lt $deadline) {
 	if (Test-Path '\\.\pipe\AetherGraphics.Runtime') { Write-Host 'Aether is listening'; exit 0 }
 	Start-Sleep -Milliseconds 500
 }
-Write-Host "Aether did not answer within $TimeoutSeconds s (see kino\output.log and kino\mods\AetherGraphics\logs\aether.jsonl)"
+Write-Host "Aether did not answer within $TimeoutSeconds s (see BepInEx\LogOutput.log and AetherLoader\mods\AetherGraphics\logs\aether.jsonl)"
 exit 1

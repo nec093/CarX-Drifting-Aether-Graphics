@@ -17,7 +17,7 @@ namespace AetherGraphics {
 	///
 	/// The fix replaces the compute shaders in HDRP's runtime resources
 	/// (HDRenderPipelineGlobalSettings.m_RenderPipelineResources.shaders, checked against the game's HDRP assembly) with
-	/// copies of the same HDRP version compiled for DX12, from kino/mods/AetherGraphics/hdrp/aether_hdrp_dx12.bundle
+	/// copies of the same HDRP version compiled for DX12, from AetherLoader/mods/AetherGraphics/hdrp/aether_hdrp_dx12.bundle
 	/// (scripts/build-hdrp-bundle.ps1). The next construction attempt then succeeds. Nothing else of HDRP is touched.
 	/// This is scaffolding: it is needed for as long as HDRP draws any part of the frame.
 	/// </summary>
@@ -66,7 +66,7 @@ namespace AetherGraphics {
 				return "not needed (not Direct3D 12)";
 			}
 			if (File.Exists(Path.Combine(configDir, "no-hdrp-fix"))) {
-				return "switched off (kino/config/AetherGraphics/no-hdrp-fix)";
+				return "switched off (AetherLoader/config/nec093.aether.graphics/no-hdrp-fix)";
 			}
 			RenderPipelineGlobalSettings settings = GraphicsSettings.GetSettingsForRenderPipeline<HDRenderPipeline>();
 			if (settings == null) {

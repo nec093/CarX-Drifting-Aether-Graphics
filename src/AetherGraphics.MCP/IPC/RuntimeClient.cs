@@ -44,7 +44,7 @@ public sealed class RuntimeClient(string pipeName, bool allowControl) : IDisposa
 		} catch (Exception e) when (e is TimeoutException or IOException or UnauthorizedAccessException) {
 			pipe.Dispose();
 			throw new RuntimeException("E_NOT_RUNNING",
-				$"Aether is not reachable on \\\\.\\pipe\\{PipeName}: the game is not running, Aether is not installed / failed to start (see kino/mods/AetherGraphics/logs/aether.jsonl and kino/output.log), or the game runs as another user. ({e.GetType().Name})");
+				$"Aether is not reachable on \\\\.\\pipe\\{PipeName}: the game is not running, Aether is not installed / failed to start (see AetherLoader/mods/AetherGraphics/logs/aether.jsonl and BepInEx/LogOutput.log), or the game runs as another user. ({e.GetType().Name})");
 		}
 		pipe_ = pipe;
 		reader_ = new StreamReader(pipe, new UTF8Encoding(false), false, 1 << 16, leaveOpen: true);

@@ -1,0 +1,10 @@
+{
+  "id": "nec093.aether.graphics",
+  "name": "Aether Graphics",
+  "version": "@VERSION@",
+  "api": "1.0",
+  "author": "nec093",
+  "description": "Graphics overhaul: Aether's own DirectX 12 renderer replaces HDRP. Overlay F10, free camera F11.",
+  "assembly": "AetherGraphics.dll",
+  "entry": "AetherGraphics.AetherGraphicsMod"
+}
