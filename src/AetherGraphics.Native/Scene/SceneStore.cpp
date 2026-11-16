@@ -1,4 +1,6 @@
 #include "SceneStore.h"
+#include <chrono>
+#include <thread>
 #include "../Core/Log.h"
 #include "../Resources/GpuResources.h"
 
@@ -613,12 +615,13 @@ void SceneStore::PublishStats(uint64_t frame) {
 	uint32_t classCounts[kAeMaterialClassCount] = {};
 	uint32_t unsupportedProps = 0, blended = 0, alphaTest = 0;
 	json report = json::array();
+	const bool wantReport = materialReportWanted_.exchange(false);
 	for (const auto& [h, m] : materials_) {
 		classCounts[m.desc.materialClass]++;
 		unsupportedProps += m.desc.unsupportedProperties;
 		blended += (m.desc.flags & kAeMaterialBlend) ? 1 : 0;
 		alphaTest += (m.desc.flags & kAeMaterialAlphaTest) ? 1 : 0;
-		if (report.size() < 600) {
+		if (wantReport && report.size() < 600) {
 			json textures = json::array();
 			static const char* slots[kAeSlotCount] = {"base", "normal", "mask", "emissive", "extra"};
 			for (uint32_t s = 0; s < kAeSlotCount; ++s) {
@@ -686,7 +689,10 @@ void SceneStore::PublishStats(uint64_t frame) {
 		summary["lastContractError"] = lastContractError_;
 	}
 	summary_ = std::move(summary);
-	materialReport_ = std::move(report);
+	if (wantReport) {
+		materialReport_ = std::move(report);
+		materialReportSerial_.fetch_add(1);
+	}
 }
 
 json SceneStore::Summary() {
@@ -697,6 +703,12 @@ json SceneStore::Summary() {
 }
 
 json SceneStore::MaterialReport(size_t max) {
+	// ask the render thread for a fresh report and wait for it (it is built at the next PublishStats, every 32 frames)
+	const uint64_t before = materialReportSerial_.load();
+	materialReportWanted_.store(true);
+	for (int i = 0; i < 150 && materialReportSerial_.load() == before; ++i) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
 	std::lock_guard lock(statsMutex_);
 	if (materialReport_.size() <= max) {
 		return materialReport_;

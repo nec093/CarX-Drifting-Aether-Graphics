@@ -42,7 +42,7 @@ AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 |---|---|
 | `summary`（既定） | シェーダーごとのマテリアル数、レンダラー数、レンダーキューの範囲、透明 / アルファテストの数、キーワード、マテリアル名の例。`refresh: false` なら前回集めた結果 |
 | `survey` | シェーダーのプロパティ配置と値、メッシュの頂点レイアウト、`screenProbes`（画面上の点の下のマテリアル）、`transparentMaterials`、`propertyBlocks`（レンダラーごとの上書き）、`lights`（HDRP 用データつき）、`environment`（`hostExposureMultiplier`：純正のパイプラインが動いているときの露出の実測値）、`volumes`。重い |
-| `aether` | Aether のマテリアル変換の結果（クラス、フラグ、数値、束縛テクスチャー、未対応プロパティ数）とクラス別の集計。`limit`（1〜600、既定 200）。描画モードが `aether` か `compare` のときに埋まる |
+| `aether` | Aether のマテリアル変換の結果（クラス、フラグ、数値、束縛テクスチャー、未対応プロパティ数）とクラス別の集計。`limit`（1〜600、既定 200）。描画モードが `aether` か `compare` のときに埋まる。呼ばれたときにだけ描画スレッドが作る（次の統計の更新、32 フレームごとまで最大 1.5 秒待つ。毎回作ると 3 000 マテリアルのマップで 32 フレームごとに引っかかった） |
 
 `get_status` のうち、よく見る項目：
 

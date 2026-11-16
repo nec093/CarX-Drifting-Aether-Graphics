@@ -658,8 +658,15 @@ float4 PSSkyCloudsLut(FullscreenOutput input) : SV_Target {
 	return float4(air * cloud.a + cloud.rgb / max(g_Atmosphere.x, 1e-6), 1.0);
 }
 
-// The clouds as the camera sees them (g_SceneColor: the air's sky view LUT): rgb their light, a what they let through.
+// The clouds as the camera sees them (g_SceneColor: the air's sky view LUT, g_PostDepth: the scene depth): rgb their
+// light, a what they let through. Only where the sky shows: a pixel the ground, a building or the car covers (all four
+// of the picture's pixels under this half size one) gets no clouds without marching (on a track most of the picture is
+// not sky; marching all of it cost 2 ms at 3840 x 2054).
 float4 PSClouds(FullscreenOutput input) : SV_Target {
+	float4 under = g_PostDepth.GatherRed(s_PointClamp, input.uv);
+	if (min(min(under.x, under.y), min(under.z, under.w)) > 0.0) {
+		return float4(0.0, 0.0, 0.0, 1.0);
+	}
 	float2 ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
 	float4 world = mul(g_InvViewProj, float4(ndc, 0.5, 1.0));
 	float3 dir = normalize(world.xyz / world.w - g_CameraPos.xyz);

@@ -480,12 +480,30 @@ namespace AetherGraphics {
 		private int sliceCursor_;
 
 		/// <summary>Looks at a share of the known mesh renderers again (mesh, materials, property blocks, state): all of them about twice a second at 60 frames a second.</summary>
+		// (UpdateSlice: at most this long per frame, so that renderers that are slow to look at (a material with property
+		// values of its own is translated again on every look) cannot pile up in one frame. Measured on a big track: 0.4 ms
+		// avg / 0.6 ms max.)
+		private const double SliceBudgetMs = 0.6;
+		private const int SliceMinimum = 8;
+		private Cost sliceCost_;
+
+		// (the parts of a tick, each timed on its own: which one a slow tick spent its time in)
+		private Cost materialCost_, ownedCost_, pendingCost_, geometryCost_;
+
+		private static long Step(ref Cost cost, long since) {
+			long now = System.Diagnostics.Stopwatch.GetTimestamp();
+			cost.Add(now - since);
+			return now;
+		}
+
 		private void UpdateSlice() {
 			int n = order_.Count;
 			if (n == 0) {
 				return;
 			}
 			int budget = Mathf.Max(32, n / 30 + 1);
+			long start = System.Diagnostics.Stopwatch.GetTimestamp();
+			long limit = start + (long)(SliceBudgetMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
 			for (int i = 0; i < budget; ++i) {
 				if (sliceCursor_ >= order_.Count) {
 					sliceCursor_ = 0;
@@ -494,7 +512,11 @@ namespace AetherGraphics {
 				if (t.renderer != null && t.skinned == null) {
 					UpdateTracked(t);
 				}
+				if (i >= SliceMinimum && System.Diagnostics.Stopwatch.GetTimestamp() > limit) {
+					break; // the rest next frame
+				}
 			}
+			sliceCost_.Add(System.Diagnostics.Stopwatch.GetTimestamp() - start);
 		}
 
 		private unsafe void UpdateTracked(Tracked t) {
@@ -753,22 +775,37 @@ namespace AetherGraphics {
 			materials_[handle] = new TrackedMaterial { material = m, crc = crc, owner = owner, index = index, signature = signature, textures = textures };
 		}
 
+		// (CheckMaterials goes through the materials a part at a time: all of a big track's 3 000 hashed in one frame took
+		// 17 ms, a hitch every two seconds. Now a sweep starts every MaterialCheckInterval and takes as many frames as it
+		// needs at MaterialCheckBudgetMs each.)
+		private const double MaterialCheckBudgetMs = 0.3;
+		private readonly List<uint> materialSweep_ = new List<uint>();
+		private int materialSweepAt_;
+
 		private void CheckMaterials() {
 			// a material edited in place (the game recolours paint, switches lights on) keeps its id: its hash tells
-			List<KeyValuePair<uint, TrackedMaterial>> changed = null;
-			foreach (var kv in materials_) {
-				Material m = kv.Value.material;
-				if (m != null && m.ComputeCRC() != kv.Value.crc) {
-					(changed ?? (changed = new List<KeyValuePair<uint, TrackedMaterial>>())).Add(kv);
+			if (materialSweepAt_ >= materialSweep_.Count) {
+				materialSweep_.Clear();
+				materialSweep_.AddRange(materials_.Keys);
+				materialSweepAt_ = 0;
+			}
+			long limit = System.Diagnostics.Stopwatch.GetTimestamp() + (long)(MaterialCheckBudgetMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+			int done = 0;
+			while (materialSweepAt_ < materialSweep_.Count) {
+				uint key = materialSweep_[materialSweepAt_++];
+				if (materials_.TryGetValue(key, out TrackedMaterial tm)) {
+					Material m = tm.material;
+					if (m != null && m.ComputeCRC() != tm.crc) {
+						RegisterMaterial(m, key, tm.owner, tm.index);
+					}
+				}
+				if (++done >= 8 && System.Diagnostics.Stopwatch.GetTimestamp() > limit) {
+					break; // the rest next frame
 				}
 			}
-			if (changed == null) {
-				return;
-			}
-			foreach (var kv in changed) {
-				RegisterMaterial(kv.Value.material, kv.Key, kv.Value.owner, kv.Value.index);
-			}
 		}
+
+		private bool MaterialSweepRunning => materialSweepAt_ < materialSweep_.Count;
 
 		private void QueueMesh(Mesh mesh) {
 			uint h = Handle(mesh);
@@ -1456,6 +1493,11 @@ namespace AetherGraphics {
 			if (now >= nextCostRoll_) {
 				nextCostRoll_ = now + 5.0f;
 				scanCost_.Roll();
+				sliceCost_.Roll();
+				materialCost_.Roll();
+				ownedCost_.Roll();
+				pendingCost_.Roll();
+				geometryCost_.Roll();
 				tickCost_.Roll();
 				frameCost_.Roll();
 			}
@@ -1479,15 +1521,22 @@ namespace AetherGraphics {
 				scanCost_.Add(System.Diagnostics.Stopwatch.GetTimestamp() - scanStart);
 			}
 			UpdateSlice();
-			if (now >= nextMaterialCheck_) {
+			long at = System.Diagnostics.Stopwatch.GetTimestamp();
+			if (MaterialSweepRunning) {
+				CheckMaterials();
+			} else if (now >= nextMaterialCheck_) {
 				nextMaterialCheck_ = now + MaterialCheckInterval;
 				CheckMaterials();
 			}
+			at = Step(ref materialCost_, at);
 			RefreshOwnedMaterials();
+			at = Step(ref ownedCost_, at);
 			ProcessPending();
+			at = Step(ref pendingCost_, at);
 			UpdateDynamicMeshes();
 			UpdateGeometry();
 			UpdateSkinnedGeometry();
+			Step(ref geometryCost_, at);
 		}
 
 		// ---- geometry for ray tracing. The game's meshes cannot be read on the CPU (not marked readable), so their
@@ -2094,7 +2143,7 @@ namespace AetherGraphics {
 
 		public string Status() {
 			return order_.Count + " renderers, " + meshes_.Count + " meshes (" + pendingMeshes_.Count + " pending), " + materials_.Count + " materials, " + textures_.Count + " textures (" +
-				pendingTextures_.Count + " pending), " + lights_.Count + " lights, " + lodGroups_.Count + " LOD groups, " + OffscreenCasters + " off-screen shadow casters, " + SkinnedBuffers() + " skinned buffers of " + skinnedTracked_.Count + " skinned renderers, " + dynamicMeshes_.Count + " dynamic meshes; ray tracing geometry: " + GeometryStatus + "; skipped: " + SkinnedSkipped + " skinned renderers, " + UnsupportedFormats + " unsupported meshes / textures; " + particles_.LastCount + " particles (" + particles_.LastSmoke + " tyre smoke, " + particles_.Systems + " particle systems); main thread ms: scan " + scanCost_ + ", tick " + tickCost_ + ", frame " + frameCost_ + ", pipeline " + AetherPipeline.Timing;
+				pendingTextures_.Count + " pending), " + lights_.Count + " lights, " + lodGroups_.Count + " LOD groups, " + OffscreenCasters + " off-screen shadow casters, " + SkinnedBuffers() + " skinned buffers of " + skinnedTracked_.Count + " skinned renderers, " + dynamicMeshes_.Count + " dynamic meshes; ray tracing geometry: " + GeometryStatus + "; skipped: " + SkinnedSkipped + " skinned renderers, " + UnsupportedFormats + " unsupported meshes / textures; " + particles_.LastCount + " particles (" + particles_.LastSmoke + " tyre smoke, " + particles_.Systems + " particle systems); main thread ms: scan " + scanCost_ + ", slice " + sliceCost_ + ", materials " + materialCost_ + ", owned " + ownedCost_ + ", pending " + pendingCost_ + ", geometry " + geometryCost_ + ", tick " + tickCost_ + ", frame " + frameCost_ + ", pipeline " + AetherPipeline.Timing;
 		}
 	}
 }

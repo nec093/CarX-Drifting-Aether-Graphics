@@ -67,7 +67,10 @@ public:
 	ID3D12Device* Device() const { return device_; }
 
 	// ---- descriptors
-	static const uint32_t kSrvHeapSize = 16384;
+	// the shader-visible view heap. A map with many materials needs many: each material takes a table of kAeSlotCount views
+	// (a map with 3089 materials used 16 113 of 16 384 and views stopped being made: surfaces flashed white). Keep in step
+	// with g_SceneTextures in shaders\aether_bvh.hlsli.
+	static const uint32_t kSrvHeapSize = 65536;
 	ID3D12DescriptorHeap* SrvHeap() const { return srvHeap_.Get(); }
 	uint32_t AllocSrv(uint32_t count = 1); // UINT32_MAX when the heap is full
 	void FreeSrv(uint32_t index, uint32_t count, UINT64 fence); // reusable once the fence has passed

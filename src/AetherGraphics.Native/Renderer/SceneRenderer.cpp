@@ -2742,11 +2742,12 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		cloudDesc.height = std::max(target.height / 2, 1u);
 		cloudDesc.format = cloudDesc.targetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		cloudLayer = graph_.CreateTransient("SceneClouds", cloudDesc, ResourceCategory::RenderTarget);
-		graph_.AddPass("Clouds", true, [&, airSky, cloudLayer](RenderGraph::Builder& b) {
+		graph_.AddPass("Clouds", true, [&, airSky, cloudLayer, depth](RenderGraph::Builder& b) {
 			b.Read(airSky, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Read(depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); // (marched only where the sky shows)
 			b.Write(cloudLayer, D3D12_RESOURCE_STATE_RENDER_TARGET);
-		}, [&, airSky, cloudLayer](RenderGraph::PassContext& ctx) {
-			Fullscreen(ctx, kFullscreenClouds, ctx.Texture(cloudLayer), ctx.Texture(airSky));
+		}, [&, airSky, cloudLayer, depth](RenderGraph::PassContext& ctx) {
+			Fullscreen(ctx, kFullscreenClouds, ctx.Texture(cloudLayer), ctx.Texture(airSky), ctx.Texture(depth));
 		});
 	}
 	graph_.AddPass("Sky", true, [&, airSky, cloudLayer](RenderGraph::Builder& b) {

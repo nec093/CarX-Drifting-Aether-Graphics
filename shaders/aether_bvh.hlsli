@@ -31,7 +31,7 @@ RaytracingAccelerationStructure g_Scene : register(t8);
 StructuredBuffer<TlasInstance> g_TlasInstances : register(t9);
 StructuredBuffer<uint2> g_RayMaterials : register(t10); // per instance and sub mesh: x its index in g_Materials, y its base texture in g_SceneTextures (0xFFFFFFFF: none)
 // every texture in the SRV heap, by its place there: a hit reads the base texture of whatever it landed on
-Texture2D g_SceneTextures[16384] : register(t0, space5);
+Texture2D g_SceneTextures[65536] : register(t0, space5); // the whole view heap (GpuResources::kSrvHeapSize)
 
 struct BvhHit {
 	float t;        // distance along the ray (in units of the direction's length); < 0: nothing hit
@@ -114,7 +114,7 @@ uint2 BvhHitMaterial(TlasInstance inst, BvhTri tri) {
 		return uint2(0u, 0xFFFFFFFFu);
 	}
 	uint2 entry = g_RayMaterials[(inst.materialOffset & 0x00FFFFFFu) + tri.subMesh];
-	if (entry.y >= 16384u) {
+	if (entry.y >= 65536u) {
 		entry.y = 0xFFFFFFFFu;
 	}
 	return entry;

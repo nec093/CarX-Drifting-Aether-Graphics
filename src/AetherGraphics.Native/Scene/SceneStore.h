@@ -159,6 +159,10 @@ private:
 	std::mutex statsMutex_;
 	json summary_ = json::object();
 	json materialReport_ = json::array();
+	// the per material report is built only when asked for (MaterialReport): built every 32 frames for a track's
+	// 3 000 materials it took about 10 ms of the render thread, a hitch every 32 frames
+	std::atomic<bool> materialReportWanted_{false};
+	std::atomic<uint64_t> materialReportSerial_{0};
 	std::atomic<uint32_t> contractErrors_{0};
 	std::string lastContractError_;
 };
