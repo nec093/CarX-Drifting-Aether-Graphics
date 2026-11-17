@@ -144,6 +144,22 @@ float4 PSTaa(FullscreenOutput input) : SV_Target {
 	return float4(SafeColor(result), movingNow);
 }
 
+// ---- DLSS's motion vectors (Renderer/Dlss.cpp): where each pixel's surface was on screen in the frame before minus
+// where it is now, in uv units, without the jitter (DLSS scales them to render pixels). g_PostAux2: the opaque pass's
+// velocity (now minus before, without the jitter; x = 1000 where nothing opaque was drawn: there the camera's motion
+// from the depth, as the TAA pass does it). g_PostDepth: the scene depth.
+float4 PSDlssMotion(FullscreenOutput input) : SV_Target {
+	int2 p = int2(input.position.xy);
+	float4 motion = g_PostAux2.Load(int3(p, 0));
+	if (motion.x < 100.0) {
+		return float4(-motion.xy, 0.0, 0.0);
+	}
+	float depth = g_PostDepth.Load(int3(p, 0)).r;
+	// (the jittered projection drew the point at this pixel's centre; without the jitter it is g_Jitter.xy (clip) away)
+	float2 now = input.uv - g_Jitter.xy * float2(0.5, -0.5);
+	return float4(PreviousUv(input.uv, depth) - now, 0.0, 0.0);
+}
+
 // ---- motion blur: every still point of the world is smeared along the way it moved on screen since the frame before
 // (the camera's own motion). What moves by itself (marked in the velocity target: the car the camera follows) stays sharp and is not
 // smeared into its surroundings.
@@ -152,12 +168,14 @@ float4 PSMotionBlur(FullscreenOutput input) : SV_Target {
 	float4 center = g_SceneColor.Load(int3(p, 0));
 	// (g_PostAux: the opaque pass's velocity target; z = 1 marks what moves by itself)
 	// (the blur needs the camera of the frame before, not the temporal history: it also runs without antialiasing)
-	if (g_PostAux.Load(int3(p, 0)).z > 0.5) {
+	// (the velocity and the depth are read by uv: with DLSS super resolution they have the render size, the picture
+	// the target's; g_PassParams.zw is 1 / the picture's size)
+	if (g_PostAux.SampleLevel(s_PointClamp, input.uv, 0.0).z > 0.5) {
 		return center;
 	}
-	float depth = g_PostDepth.Load(int3(p, 0)).r;
+	float depth = g_PostDepth.SampleLevel(s_PointClamp, input.uv, 0.0).r;
 	float2 velocity = (input.uv - PreviousUv(input.uv, depth)) * g_PostParams.z;
-	float pixels = length(velocity * g_ScreenSize.xy);
+	float pixels = length(velocity / g_PassParams.zw);
 	if (pixels < 1.0) {
 		return center;
 	}
@@ -228,33 +246,55 @@ float4 ScreenRadianceAt(float3 worldPos) {
 // `hitT`: how far the ray went to what it brought back (the sky: 10 km).
 float3 TracedRadianceT(float3 o, float3 d, bool sunDisc, out float hitT) {
 	// (a hit the texture's alpha cuts away is passed: a few times, then the sky)
+	// Metal that a ray meets mirrors in turn: up to two more rays along its mirror direction (a mesh wheel's spokes and
+	// its chromed barrel show each other, as in the path traced picture; with the sky standing in for that, the inside
+	// of a wheel was an even bright colour).
 	hitT = 0.0;
-	for (int attempt = 0; attempt < 3; ++attempt) {
+	float3 sum = 0.0, throughput = 1.0;
+	int mirrors = 0;
+	bool first = true;
+	for (int attempt = 0; attempt < 5; ++attempt) {
 		BvhHit hit = BvhTrace(o, d, 500.0, false);
 		if (hit.t < 0.0) {
 			break;
 		}
 		float3 P = o + d * hit.t;
-		hitT += hit.t;
-		float4 screen = ScreenRadianceAt(P);
-		if (screen.a > 0.5) {
-			return screen.rgb;
+		if (first) {
+			hitT += hit.t;
 		}
-		float4 surface = BvhHitSurface(P, hit, hit.t, d);
+		float4 screen = ScreenRadianceAt(P);
+		if (screen.a > 0.5 && first) {
+			return screen.rgb; // (the screen shows that place, metal's mirror image included)
+		}
+		float3 mirrorWeight;
+		float4 surface = BvhHitSurfaceReflected(P, hit, hit.t, d, mirrorWeight);
 		if (surface.a > 0.5) {
-			return surface.rgb;
+			sum += throughput * surface.rgb;
+			if (mirrors >= 2 || max(mirrorWeight.r, max(mirrorWeight.g, mirrorWeight.b)) < 0.02) {
+				return sum;
+			}
+			++mirrors;
+			first = false;
+			throughput *= mirrorWeight;
+			d = reflect(d, hit.normal);
+			o = P + hit.normal * 0.01;
+			continue;
 		}
 		o = P + d * 0.02;
-		hitT += 0.02;
+		if (first) {
+			hitT += 0.02;
+		}
 	}
-	hitT = 10000.0;
-	float3 sky = SkyRadiance(d, 0.0);
+	if (first) {
+		hitT = 10000.0;
+	}
+	float3 sky = sum + throughput * SkyRadiance(d, 0.0);
 	if (sunDisc && g_SunDirection.w > 0.5) {
 		// (wider than the real disc, two degrees across its soft edge: a wheel's curves shrink it to a point anyway, and a
 		// point smaller than a pixel would come and go)
 		float c = dot(d, g_SunDirection.xyz);
 		// (a core and a wide glow round it: the glow is what reads as a gleam on a part that only nearly faces the sun)
-		sky += g_SunColor.rgb * ((smoothstep(0.99863, 0.99985, c) * 200.0 + smoothstep(0.985, 0.9995, c) * 6.0) * CloudShadow(o));
+		sky += throughput * g_SunColor.rgb * ((smoothstep(0.99863, 0.99985, c) * 200.0 + smoothstep(0.985, 0.9995, c) * 6.0) * CloudShadow(o));
 	}
 	return sky;
 }
@@ -349,9 +389,17 @@ float4 PSAoRays(FullscreenOutput input) : SV_Target {
 
 // How smooth a surface must be to mirror here: the scene's own setting, and never rougher than about 0.4 (what is
 // mirrored here is sharp; a rough surface's blurred surroundings come from the probes).
+// Metal (its reflection weight is far above any rough dielectric's, a > 0.15 to 0.3) is traced up to roughness 0.75,
+// whatever the scene's setting: a rough metal shows nothing but its reflection, and lit by the sky alone (no probe
+// near it, or none at all) a brushed or satin rim, a gold mesh wheel, came out an even flat colour, where the game's
+// picture shows the dark wheel arch and the bright ground in it. Its rays are sampled from its lobe and denoised (NRD).
 float MirrorAmount(float4 surface) {
 	float smoothness = 1.0 - surface.z;
-	return surface.a * min(saturate((smoothness - g_SsrParams.y) / max(g_SsrParams.z - g_SsrParams.y, 1e-3)), saturate((0.4 - surface.z) / 0.2));
+	float dielectric = min(saturate((smoothness - g_SsrParams.y) / max(g_SsrParams.z - g_SsrParams.y, 1e-3)), saturate((0.4 - surface.z) / 0.2));
+	float metal = saturate((0.75 - surface.z) / 0.25);
+	// (the weight already carries the specular occlusion: a gold spoke deep in its wheel's dish arrived at 0.36. A
+	// rough dielectric's (0.4 to 0.75) stays under 0.15 even at grazing angles: its Fresnel term is spread out.)
+	return surface.a * lerp(dielectric, max(dielectric, metal), smoothstep(0.15, 0.3, surface.a));
 }
 
 // The normal a mirror uses at a pixel: the surface's normals around it, averaged. A model's shading normals are
@@ -414,7 +462,8 @@ float4 PSRayTrace(FullscreenOutput input) : SV_Target {
 	// lobe, a their hit distance, -1 where no ray is traced. Else along the mirror direction, a the view depth.
 	const bool forNrd = g_PassParams.z > 0.5;
 	const float4 none = forNrd ? float4(0.0, 0.0, 0.0, -1.0) : 0.0;
-	int2 p = int2(input.position.xy) * 2;
+	const int rayStep = max((int)g_PassParams.x, 1); // (pixels per ray along each axis: 1 or 2)
+	int2 p = int2(input.position.xy) * rayStep;
 	if (any(p >= int2(g_ScreenSize.xy))) {
 		return none;
 	}
@@ -437,9 +486,20 @@ float4 PSRayTrace(FullscreenOutput input) : SV_Target {
 	if (forNrd) {
 		R = SampleLobe(V, mirrorN, surface.z, p, uint(g_PassParams.w));
 	}
-	// (with the sun where the ray reaches it: the sun's image in the lacquer)
+	// (with the sun where a mirror ray reaches it: the sun's image in the lacquer. Not for the rays sampled from a
+	// glossy lobe: the forward pass already lights the surface with the sun's highlight, and a lobe ray that happens to
+	// meet the disc was a bright speck NRD smeared into a blotch)
 	float hitT;
-	float3 radiance = min(TracedRadianceT(P + N * (0.004 * viewDepth + 0.01), R, true, hitT), 300.0);
+	float3 radiance = TracedRadianceT(P + N * (0.004 * viewDepth + 0.01), R, !forNrd, hitT);
+	radiance = min(radiance, 300.0);
+	if (forNrd) {
+		// fireflies: a lobe ray that happens on something far brighter than the surroundings (a gap to the bright sky, a
+		// lamp) is held to a few times the sky's mean light, so that it does not sparkle from frame to frame (NRD
+		// spreads such a sample and it comes and goes as a blotch)
+		float mean = max(dot(AmbientDiffuse(float3(0.0, 1.0, 0.0)) * g_Misc.w, float3(0.2126, 0.7152, 0.0722)), 1e-4);
+		float lum = dot(radiance, float3(0.2126, 0.7152, 0.0722));
+		radiance *= min(1.0, mean * 12.0 / max(lum, 1e-6));
+	}
 	return float4(radiance, forNrd ? hitT : viewDepth);
 }
 
@@ -540,16 +600,24 @@ float4 PSSsr(FullscreenOutput input) : SV_Target {
 		// by whether it was traced for the same surface (its distance from the eye agrees)
 		float3 soft = shaded;
 		if (halfShare > 0.0) {
-		float2 at = float2(p) * 0.5;
+		const float rayStep = max(g_PassParams.x, 1.0);
+		float2 at = float2(p) / rayStep;
 		int2 base = int2(floor(at));
 		float2 f = at - float2(base);
 		float3 sum = 0.0;
 		float weight = 0.0;
 		for (int k = 0; k < 4; ++k) {
 			int2 o = int2(k & 1, k >> 1);
-			float4 ray = g_PostAux2.Load(int3(max(base + o, 0), 0));
+			int2 at2 = max(base + o, 0);
+			float4 ray = g_PostAux2.Load(int3(at2, 0));
 			float w = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y) + 0.02;
 			w *= ray.a > 0.0 ? exp(-abs(ray.a - viewDepth) / (0.03 * viewDepth + 0.02)) : 0.0;
+			// and whether it faces the same way (the ray was traced for the pixel at twice its place): across a crease
+			// of the body the other side's reflection does not bleed over
+			float3 rayN = OctDecode(g_PostAux.Load(int3(min(at2 * (int)rayStep, int2(g_ScreenSize.xy) - 1), 0)).xy);
+			// (never to nothing: on fine shapes (a mesh wheel's spokes) every neighbour can face elsewhere, and a pixel
+			// that fell back to the unreflected shading stood out as a bright speck)
+			w *= lerp(0.08, 1.0, pow(saturate(dot(N, rayN)), 8.0));
 			sum += ray.rgb * w;
 			weight += w;
 		}
@@ -988,22 +1056,45 @@ float4 PSAmbientOcclusionBlur(FullscreenOutput input) : SV_Target {
 	return weight > 0.0 ? sum / weight : g_SceneColor.Load(int3(pixel, 0));
 }
 
-// Automatic exposure without the host: the geometric mean of the scene's luminance over a 32 x 18 grid (each point the
-// mean of four pixels), as an EV100 kept inside the host's limits, written as the exposure multiplier. The value moves
-// from the one of the frame before (g_PostAux, 1 x 1) by g_ExposureParams.w: one frame's metering alone follows every
-// highlight that crosses a grid point, which shows as a picture that flickers.
+// Automatic exposure without the host, as an eye adapts: the scene's luminance over a 32 x 18 grid (each point the mean
+// of four pixels), weighted to the middle of the picture, in a histogram of log luminance. The darkest quarter and
+// the brightest tenth are left out (deep shadow, the sun, lamps and their reflections do not move it), the mean of
+// the rest in log is metered, as an EV100 kept inside the limits, and written as the exposure multiplier. The value
+// moves from the one of the frame before (g_PostAux, 1 x 1): faster towards light (g_ExposureParams.w) than towards
+// the dark (g_ToneCurve.w), as eyes do; one frame's metering alone would follow every highlight and flicker.
 float4 PSExposure(FullscreenOutput input) : SV_Target {
 	const int kGridX = 32, kGridY = 18;
-	float sum = 0.0;
+	const int kBins = 64;
+	const float kMinLog = -14.0, kMaxLog = 22.0;
+	float hist[kBins];
+	for (int b = 0; b < kBins; ++b) {
+		hist[b] = 0.0;
+	}
+	float total = 0.0;
 	for (int y = 0; y < kGridY; ++y) {
 		for (int x = 0; x < kGridX; ++x) {
 			// a pixel corner: the linear sampler returns the mean of the four pixels around it
 			float2 uv = floor((float2(x, y) + 0.5) / float2(kGridX, kGridY) * g_ScreenSize.xy) / g_ScreenSize.xy;
 			float3 c = SafeColor(g_SceneColor.SampleLevel(s_LinearClamp, uv, 0.0).rgb);
-			sum += log2(max(dot(c, float3(0.2126, 0.7152, 0.0722)), 1e-4));
+			float l = log2(max(dot(c, float3(0.2126, 0.7152, 0.0722)), 1e-4));
+			float2 q = (float2(x, y) + 0.5) / float2(kGridX, kGridY) * 2.0 - 1.0;
+			float w = lerp(1.0, 0.35, saturate(dot(q, q) * 0.5)); // the middle counts most
+			int bin = clamp((int)((l - kMinLog) / (kMaxLog - kMinLog) * kBins), 0, kBins - 1);
+			hist[bin] += w;
+			total += w;
 		}
 	}
-	float mean = exp2(sum / float(kGridX * kGridY));
+	// the mean log luminance between the 25th and the 90th percentile
+	float low = total * 0.25, high = total * 0.90, below = 0.0, sum = 0.0, weight = 0.0;
+	for (int k = 0; k < kBins; ++k) {
+		float from = max(below, low), to = min(below + hist[k], high);
+		if (to > from) {
+			sum += (to - from) * (kMinLog + (k + 0.5) * (kMaxLog - kMinLog) / kBins);
+			weight += to - from;
+		}
+		below += hist[k];
+	}
+	float mean = exp2(weight > 0.0 ? sum / weight : 0.0);
 	float ev = log2(mean * 100.0 / 12.5) - g_ExposureParams.z;
 	if (g_Atmosphere.w > 0.5) {
 		// the physical sky: evenings and nights are not exposed all the way up to a daylight picture
@@ -1014,7 +1105,7 @@ float4 PSExposure(FullscreenOutput input) : SV_Target {
 		float previous = g_PostAux.Load(int3(0, 0, 0)).r;
 		if (SafeValue(previous) > 0.0 && previous < 1e6) { // (not a number: this frame's value alone)
 			float previousEv = clamp(-log2(1.2 * previous), g_ExposureParams.x, g_ExposureParams.y);
-			ev = lerp(previousEv, ev, g_ExposureParams.w);
+			ev = lerp(previousEv, ev, ev > previousEv ? g_ExposureParams.w : g_ToneCurve.w);
 		}
 	}
 	float exposure = 1.0 / (1.2 * exp2(ev));
@@ -1023,7 +1114,10 @@ float4 PSExposure(FullscreenOutput input) : SV_Target {
 
 // AgX (Troy Sobotka), in Benjamin Wrensch's minimal form (MIT): the scene's colours go through a matrix that pulls
 // bright saturated colours towards white the way film does, a log curve with a fitted S shape, and back.
-float3 TonemapAgX(float3 color) {
+// `punchy`: Blender's "Punchy" look on top (in AgX's space, before it goes back: power 1.35, saturation 1.4). The
+// base curve is flat on purpose (bright colours run to white, the mid tones keep room): it reads washed out next to the
+// game's own curve.
+float3 TonemapAgX(float3 color, bool punchy = false) {
 	const float3x3 kIn = float3x3(0.842479062253094, 0.0784335999999992, 0.0792237451477643,
 		0.0423282422610123, 0.878468636469772, 0.0791661274605434,
 		0.0423756549057051, 0.0784336, 0.879142973793104);
@@ -1037,6 +1131,11 @@ float3 TonemapAgX(float3 color) {
 	// the S curve (a polynomial fit of AgX's default contrast)
 	float3 v2 = v * v, v4 = v2 * v2;
 	v = 15.5 * v4 * v2 - 40.14 * v4 * v + 31.96 * v4 - 6.868 * v2 * v + 0.4298 * v2 + 0.1191 * v - 0.00232;
+	if (punchy) {
+		v = pow(max(v, 0.0), 1.35);
+		float luma = dot(v, float3(0.2126, 0.7152, 0.0722));
+		v = luma + 1.4 * (v - luma);
+	}
 	v = mul(kOut, v);
 	return pow(saturate(v), 2.2); // (the curve's output is display encoded: back to linear for the sRGB step after it)
 }
@@ -1104,6 +1203,7 @@ float4 PSComposite(FullscreenOutput input) : SV_Target {
 		else if (mode == 2) color = TonemapNeutral(color);
 		else if (mode == 3) color = TonemapHostCurve(color);
 		else if (mode == 4) color = TonemapAgX(color);
+		else if (mode == 5) color = TonemapAgX(color, true);
 	}
 	return float4(LinearToSRGB(color), 1.0);
 }
@@ -1576,6 +1676,13 @@ PtSurface PtMaterial(BvhHit hit, float t, bool primary, out bool solid) {
 	if (cls == CLASS_VEHICLE_PAINT) {
 		// the forward shader's paint: chrome, matt, or lacquered pigment with aluminium flakes in it
 		float mirror = smoothstep(0.8, 0.95, metallic) * (1.0 - smoothstep(0.1, 0.3, s.roughness));
+		if (mat.params3.y > 0.5) {
+			// (a paint with a mask map the rays could not read (BvhHitAlbedoLevel applies it when its heap index is there, and
+			// clears params3.y): the map scales its metalness and roughness, and the material's own numbers (metallic 1,
+			// smooth) would make a chrome mirror. No chrome then, and the flakes taken at half.)
+			mirror = 0.0;
+			metallic *= 0.5;
+		}
 		float lacquered = max(saturate(mat.params2.x * 4.0), 1.0 - smoothstep(0.25, 0.45, s.roughness));
 		float flakes = metallic * (1.0 - mirror);
 		s.coat = lacquered * (1.0 - mirror);
@@ -1596,8 +1703,8 @@ PtSurface PtMaterial(BvhHit hit, float t, bool primary, out bool solid) {
 		s.coatRoughness = clamp(mat.params2.y, 0.03, 1.0);
 	}
 	if (cls != CLASS_VEHICLE_PAINT && mat.params3.y > 0.5) {
-		// (the mask map, which rays cannot read, scales the roughness: HDRP's smoothness in its alpha, the game's pack
-		// maps' roughness in red. Taken at a middling value: without it concrete and asphalt came out wet and glossy.)
+		// (a mask map the rays could not read scales the roughness: HDRP's smoothness in its alpha, the game's pack maps'
+		// roughness in red. Taken at a middling value: without it concrete and asphalt came out wet and glossy.)
 		s.roughness = mat.params3.x < 1.5 ? 1.0 - (1.0 - s.roughness) * 0.5 : s.roughness * 0.7;
 		s.roughness = clamp(s.roughness, 0.03, 1.0);
 	}
@@ -1636,12 +1743,13 @@ float3 PtEvaluate(PtSurface s, float3 N, float3 V, float3 L, float3 weights, out
 	return (diffuse + spec) * (1.0 - coatView) + coatSpec;
 }
 
-// A direction for the next ray, drawn from one of the lobes.
-float3 PtSampleLobe(PtSurface s, float3 N, float3 V, float3 weights) {
+// A direction for the next ray, drawn from one of the lobes (specular: from the base's or the lacquer's GGX).
+float3 PtSampleLobe(PtSurface s, float3 N, float3 V, float3 weights, out bool specular) {
 	float3x3 basis = PtBasis(N);
 	float choice = PtRandom();
 	float2 u = float2(PtRandom(), PtRandom());
-	if (choice < weights.x) {
+	specular = choice >= weights.x;
+	if (!specular) {
 		float r = sqrt(u.x), phi = 2.0 * PI * u.y;
 		float3 l = float3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u.x)));
 		return normalize(mul(l, basis));
@@ -1719,6 +1827,117 @@ float3 PtDirect(PtSurface s, float3 P, float3 N, float3 Ng, float3 V, float3 wei
 	return light;
 }
 
+// The split sum's preintegrated GGX reflectance (Karis' analytic fit): F0 * x + y, by roughness and N.V.
+float2 PtEnvBrdf(float roughness, float NoV) {
+	const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+	const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+	float4 r = roughness * c0 + c1;
+	float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+	return float2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// What DLSS Ray Reconstruction is told about the first surface: its albedos, normal and roughness.
+struct PtGuides {
+	float3 diffuseAlbedo;
+	float3 specularAlbedo;
+	float3 normal;    // world space
+	float roughness;  // the base's perceptual (linear) roughness
+};
+
+// The eye's ray d through pixel p: whether the ray tracing geometry agrees with the depth buffer there (false: the
+// rasterised picture answers), its first hit (t along d) and whether that takes the rasterised normal.
+bool PtPrimary(int2 p, float3 d, out BvhHit hit, out float t, out bool rasterNormal) {
+	float depth = g_PostDepth.Load(int3(p, 0)).r;
+	hit.t = -1.0;
+	t = 0.0;
+	rasterNormal = false;
+	if (depth <= 0.0) {
+		return false;
+	}
+	// where the depth buffer has the surface (the pixel's middle)
+	float2 ndcMid = (float2(p) + 0.5) * g_ScreenSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+	float4 hm = mul(g_InvViewProj, float4(ndcMid, depth, 1.0));
+	float rasterDistance = length(hm.xyz / hm.w - g_CameraPos.xyz);
+	hit = PtTrace(g_CameraPos.xyz, d, t);
+	// (the depth buffer has something the rays do not: a person, glass, something drawn but not in the geometry)
+	if (!(hit.t >= 0.0 && t < rasterDistance * 1.05 + 0.05)) {
+		return false;
+	}
+	rasterNormal = abs(t - rasterDistance) < rasterDistance * 0.02 + 0.02;
+	return true;
+}
+
+// One path on from the eye's first hit (from PtPrimary): the light it brings back. With `guides`, the first surface's
+// guides are written to g. specularHit: how far the first bounce's ray went when it was drawn from a specular lobe
+// (5000: to the sky), else -1.
+float3 PtFollow(int2 p, float3 d, BvhHit hit, float t, bool rasterNormal, int bounces, bool guides, inout PtGuides g, out float specularHit) {
+	float3 radiance = 0.0, throughput = 1.0;
+	float3 o = g_CameraPos.xyz;
+	specularHit = -1.0;
+	[loop] for (int bounce = 0; bounce <= bounces; ++bounce) {
+		float3 P = o + d * t;
+		float3 Ng = hit.normal;
+		float3 N = Ng;
+		if (bounce == 0 && rasterNormal) {
+			float3 shading = OctDecode(g_PostAux.Load(int3(p, 0)).xy);
+			N = dot(shading, -d) > 0.0 ? shading : Ng;
+		}
+		float3 V = -d;
+		bool solid;
+		PtSurface s = PtMaterial(hit, t, bounce == 0, solid);
+		if (bounce == 0 && rasterNormal && s.coat <= 0.0 && !any(s.emission > 0.0)) {
+			s.roughness = clamp(g_PostAux.Load(int3(p, 0)).z, 0.03, 1.0); // (the rasterised roughness: with the mask map)
+		}
+		if (bounce == 0 && guides) {
+			float NoV = saturate(dot(N, V));
+			float coatView = s.coat * (s.coatF0 + (1.0 - s.coatF0) * pow(1.0 - NoV, 5.0));
+			float2 base = PtEnvBrdf(s.roughness, NoV), lacquer = PtEnvBrdf(s.coatRoughness, NoV);
+			bool emissive = any(s.emission > 0.0);
+			// (an unlit surface's light is its own: told as a white diffuse surface, like the rasterised pixels)
+			g.diffuseAlbedo = emissive ? 1.0 : s.diffuse * (1.0 - coatView);
+			g.specularAlbedo = emissive ? 0.0 : (s.f0 * base.x + base.y) * (1.0 - coatView) + s.coat * (s.coatF0 * lacquer.x + lacquer.y);
+			g.normal = N;
+			g.roughness = emissive ? 1.0 : s.roughness;
+		}
+		radiance += throughput * s.emission;
+		if (any(s.emission > 0.0)) {
+			break;
+		}
+		float3 weights = PtLobeWeights(s, max(dot(N, V), 1e-4));
+		radiance += throughput * PtDirect(s, P, N, Ng, V, weights);
+		if (bounce == bounces) {
+			break;
+		}
+		bool specular;
+		float3 L = PtSampleLobe(s, N, V, weights, specular);
+		float pdf;
+		float3 f = PtEvaluate(s, N, V, L, weights, pdf);
+		float NoL = dot(N, L);
+		if (pdf <= 1e-6 || NoL <= 0.0 || dot(Ng, L) <= 0.0) {
+			break;
+		}
+		throughput *= min(f * NoL / pdf, 8.0);
+		if (bounce >= 2) {
+			float keep = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+			if (PtRandom() > keep) {
+				break;
+			}
+			throughput /= keep;
+		}
+		o = P + Ng * (0.002 + 1e-4 * t);
+		d = L;
+		hit = PtTrace(o, d, t);
+		if (bounce == 0 && specular) {
+			specularHit = hit.t < 0.0 ? 5000.0 : t;
+		}
+		if (hit.t < 0.0) {
+			radiance += throughput * SkyRadiance(d, 0.0) * g_Misc.w; // (the sun's disc is in PtDirect)
+			break;
+		}
+	}
+	return SafeColor(radiance);
+}
+
 float4 PSPathTrace(FullscreenOutput input) : SV_Target {
 	int2 p = int2(input.position.xy);
 	const uint sampleIndex = uint(g_PassParams.x);
@@ -1727,79 +1946,84 @@ float4 PSPathTrace(FullscreenOutput input) : SV_Target {
 	s_PtState = PtHash(uint(p.x) + PtHash(uint(p.y) + PtHash(sampleIndex * 9781u + uint(g_PassParams.w))));
 
 	float4 sample = 0.0; // rgb: the light (times a), a: 1 = the path traced picture answers for this sample
-	float depth = g_PostDepth.Load(int3(p, 0)).r;
-	if (depth > 0.0) {
-		// where the depth buffer has the surface (the pixel's middle), and the eye's ray through a random place in the pixel
-		float2 ndcMid = (float2(p) + 0.5) * g_ScreenSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
-		float4 hm = mul(g_InvViewProj, float4(ndcMid, depth, 1.0));
-		float rasterDistance = length(hm.xyz / hm.w - g_CameraPos.xyz);
-		float2 ndc = (float2(p) + float2(PtRandom(), PtRandom())) * g_ScreenSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
-		float4 hf = mul(g_InvViewProj, float4(ndc, 0.5, 1.0));
-		float3 d = normalize(hf.xyz / hf.w - g_CameraPos.xyz);
-		float t;
-		BvhHit hit = PtTrace(g_CameraPos.xyz, d, t);
-		// (the depth buffer has something the rays do not: a person, glass, something drawn but not in the geometry)
-		bool agrees = hit.t >= 0.0 && t < rasterDistance * 1.05 + 0.05;
-		if (agrees) {
-			float3 radiance = 0.0, throughput = 1.0;
-			float3 o = g_CameraPos.xyz;
-			bool rasterNormal = abs(t - rasterDistance) < rasterDistance * 0.02 + 0.02;
-			[loop] for (int bounce = 0; bounce <= bounces; ++bounce) {
-				float3 P = o + d * t;
-				float3 Ng = hit.normal;
-				float3 N = Ng;
-				if (bounce == 0 && rasterNormal) {
-					float3 shading = OctDecode(g_PostAux.Load(int3(p, 0)).xy);
-					N = dot(shading, -d) > 0.0 ? shading : Ng;
-				}
-				float3 V = -d;
-				bool solid;
-				PtSurface s = PtMaterial(hit, t, bounce == 0, solid);
-				radiance += throughput * s.emission;
-				if (any(s.emission > 0.0)) {
-					break;
-				}
-				if (bounce == 0 && rasterNormal && s.coat <= 0.0) {
-					s.roughness = clamp(g_PostAux.Load(int3(p, 0)).z, 0.03, 1.0); // (the rasterised roughness: with the mask map)
-				}
-				float3 weights = PtLobeWeights(s, max(dot(N, V), 1e-4));
-				radiance += throughput * PtDirect(s, P, N, Ng, V, weights);
-				if (bounce == bounces) {
-					break;
-				}
-				float3 L = PtSampleLobe(s, N, V, weights);
-				float pdf;
-				float3 f = PtEvaluate(s, N, V, L, weights, pdf);
-				float NoL = dot(N, L);
-				if (pdf <= 1e-6 || NoL <= 0.0 || dot(Ng, L) <= 0.0) {
-					break;
-				}
-				throughput *= min(f * NoL / pdf, 8.0);
-				if (bounce >= 2) {
-					float keep = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
-					if (PtRandom() > keep) {
-						break;
-					}
-					throughput /= keep;
-				}
-				o = P + Ng * (0.002 + 1e-4 * t);
-				d = L;
-				hit = PtTrace(o, d, t);
-				if (hit.t < 0.0) {
-					radiance += throughput * SkyRadiance(d, 0.0) * g_Misc.w; // (the sun's disc is in PtDirect)
-					break;
-				}
-			}
-			sample = float4(SafeColor(radiance), 1.0);
-		}
+	// the eye's ray through a random place in the pixel
+	float2 ndc = (float2(p) + float2(PtRandom(), PtRandom())) * g_ScreenSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+	float4 hf = mul(g_InvViewProj, float4(ndc, 0.5, 1.0));
+	float3 d = normalize(hf.xyz / hf.w - g_CameraPos.xyz);
+	BvhHit hit;
+	float t;
+	bool rasterNormal;
+	if (PtPrimary(p, d, hit, t, rasterNormal)) {
+		PtGuides g = (PtGuides)0;
+		float specularHit;
+		sample = float4(PtFollow(p, d, hit, t, rasterNormal, bounces, false, g, specularHit), 1.0);
 	}
 	// the running average
 	return before + (sample - before) / float(sampleIndex + 1u);
 }
 
+// ---- path tracing for DLSS Ray Reconstruction (setting pathTracingDenoiser: dlss_rr): every frame fresh paths
+// (g_PassParams.x of them per pixel, averaged), no running average: RR denoises them over the frames itself. The eye's
+// rays go through the pixel's centre, which the frame's projection jitters (Halton 2, 3 as for DLAA; SceneRenderer
+// reports the same offset to RR): RR wants a jittered picture like DLSS, and a ray through a random place in the pixel
+// would blur what RR resolves. The random numbers of everything after the first hit stay random.
+// Where the rays do not answer (the sky, what the geometry does not hold) the target has the rasterised picture, told
+// to RR as a white diffuse surface facing the camera; so RR's output is the whole picture and takes its place.
+// g_SceneColor: the rasterised picture, g_PostDepth: the scene depth, g_PostAux: the surface target (normal, roughness).
+// g_PassParams: x paths per pixel (1 .. 4), y bounces, w a number that changes every frame.
+struct PtRrOutput {
+	float4 color : SV_Target0;          // linear HDR, before exposure
+	float4 diffuseAlbedo : SV_Target1;
+	float4 specularAlbedo : SV_Target2;
+	float4 normalRoughness : SV_Target3; // xyz world space normal, w roughness
+	float specularHit : SV_Target4;      // world space distance of the first specular bounce (0: none this frame)
+};
+
+PtRrOutput PSPathTraceRr(FullscreenOutput input) {
+	int2 p = int2(input.position.xy);
+	const uint paths = clamp(uint(g_PassParams.x), 1u, 4u);
+	const int bounces = int(g_PassParams.y);
+	s_PtState = PtHash(uint(p.x) + PtHash(uint(p.y) + PtHash(uint(g_PassParams.w) * 9781u + 17u)));
+	float2 ndc = (float2(p) + 0.5) * g_ScreenSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+	float4 hf = mul(g_InvViewProj, float4(ndc, 0.5, 1.0));
+	float3 d = normalize(hf.xyz / hf.w - g_CameraPos.xyz);
+
+	PtRrOutput o;
+	o.color = float4(g_SceneColor.Load(int3(p, 0)).rgb, 1.0);
+	o.diffuseAlbedo = float4(1.0, 1.0, 1.0, 1.0);
+	o.specularAlbedo = 0.0;
+	o.normalRoughness = float4(-d, 1.0);
+	o.specularHit = 0.0;
+	BvhHit hit;
+	float t;
+	bool rasterNormal;
+	if (PtPrimary(p, d, hit, t, rasterNormal)) {
+		PtGuides g = (PtGuides)0;
+		float3 light = 0.0;
+		float hitSum = 0.0, hitCount = 0.0;
+		[loop] for (uint i = 0u; i < paths; ++i) {
+			float specularHit;
+			light += PtFollow(p, d, hit, t, rasterNormal, bounces, i == 0u, g, specularHit);
+			if (specularHit >= 0.0) {
+				hitSum += specularHit;
+				hitCount += 1.0;
+			}
+		}
+		o.color = float4(light / float(paths), 1.0);
+		o.diffuseAlbedo = float4(saturate(g.diffuseAlbedo), 1.0);
+		o.specularAlbedo = float4(saturate(g.specularAlbedo), 1.0);
+		o.normalRoughness = float4(normalize(g.normal), saturate(g.roughness));
+		o.specularHit = hitCount > 0.0 ? hitSum / hitCount : 0.0;
+	}
+	return o;
+}
+
 // The path traced average over the rasterised picture, by how much of it the paths answered for (blend: a).
-// g_SceneColor: the average.
+// g_SceneColor: the average. g_PassParams.x 1: DLSS Ray Reconstruction's output instead (the whole picture: a 1).
 float4 PSPathTraceApply(FullscreenOutput input) : SV_Target {
 	float4 average = g_SceneColor.Load(int3(input.position.xy, 0));
+	if (g_PassParams.x > 0.5) {
+		return float4(SafeColor(average.rgb), 1.0);
+	}
 	return average.a > 1e-4 ? float4(average.rgb / average.a, average.a) : 0.0;
 }

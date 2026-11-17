@@ -100,11 +100,49 @@ else()
 	message(WARNING "NRD not found in AETHER_NRD_DIR (${AETHER_NRD_DIR}): the reflection denoiser is not built (scripts/fetch-deps.ps1)")
 endif()
 
+# DLSS (NVIDIA NGX, SDK v310.9.16): DLAA and super resolution for the scene's temporal resolve (Renderer/Dlss.cpp).
+# Under the NVIDIA RTX SDKs License (object code only): not committed; scripts\fetch-deps.ps1 puts the headers, the
+# NGX import library and nvngx_dlss.dll in build\deps\DLSS-310.9.16. nvngx_dlss.dll goes next to the native runtime
+# (copied beside the build here, installed by scripts\deploy.ps1). Without the folder Aether builds without DLSS and
+# the setting upscaler keeps Aether's TAA.
+# DLSS Ray Reconstruction (the path tracer's denoiser) is part of it: its headers (nvsdk_ngx_*_dlssd*.h) and
+# nvngx_dlssd.dll from the same SDK, nvngx_dlssd.dll beside nvngx_dlss.dll (without the DLL RR is reported unavailable).
+# The NGX library comes per CRT: nvsdk_ngx_s.lib is the static CRT's (/MT, what this build uses); nvsdk_ngx_d.lib is
+# the dynamic CRT's (/FAILIFMISMATCH:RuntimeLibrary=MD_DynamicRelease: it does not link into this build).
+set(AETHER_DLSS_DIR "${AETHER_DEPS_DIR}/DLSS-310.9.16" CACHE PATH "DLSS SDK folder (include, lib)")
+set(AETHER_DLSS_LIB "${AETHER_DLSS_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib")
+set(AETHER_DLSS_DLL "${AETHER_DLSS_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
+set(AETHER_DLSSD_DLL "${AETHER_DLSS_DIR}/lib/Windows_x86_64/rel/nvngx_dlssd.dll")
+if(EXISTS "${AETHER_DLSS_DIR}/include/nvsdk_ngx.h" AND EXISTS "${AETHER_DLSS_DIR}/include/nvsdk_ngx_helpers_dlssd_d3d.h" AND EXISTS "${AETHER_DLSS_LIB}" AND EXISTS "${AETHER_DLSS_DLL}")
+	target_sources(aether_core PRIVATE Renderer/Dlss.cpp)
+	target_include_directories(aether_core PRIVATE "${AETHER_DLSS_DIR}/include")
+	target_compile_definitions(aether_core PUBLIC AETHER_HAS_DLSS=1)
+	# (a Debug build has the debug static CRT, /MTd: it needs the SDK's nvsdk_ngx_s_dbg.lib, not fetched by default)
+	set(AETHER_DLSS_LIB_DEBUG "${AETHER_DLSS_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib")
+	target_link_libraries(aether_core PUBLIC "$<IF:$<CONFIG:Debug>,${AETHER_DLSS_LIB_DEBUG},${AETHER_DLSS_LIB}>")
+	message(STATUS "Aether: DLSS ${AETHER_DLSS_DIR} (${AETHER_DLSS_LIB})")
+	set(AETHER_HAS_DLSS ON)
+else()
+	target_sources(aether_core PRIVATE Renderer/Dlss.cpp) # (the stub: Dlss::Built() is false)
+	message(WARNING "DLSS not built: needs ${AETHER_DLSS_DIR}/include/nvsdk_ngx.h (and the _dlssd headers), ${AETHER_DLSS_LIB} (static CRT) and ${AETHER_DLSS_DLL} (scripts/fetch-deps.ps1)")
+	set(AETHER_HAS_DLSS OFF)
+endif()
+
 # the game DLL
 add_library(AetherGraphicsNative SHARED Device/UnityBridge.cpp Renderer/Smoke.cpp)
 target_compile_definitions(AetherGraphicsNative PRIVATE AETHER_NATIVE_EXPORTS)
 target_include_directories(AetherGraphicsNative PRIVATE "${UNITY_PLUGIN_API_DIR}")
 target_link_libraries(AetherGraphicsNative PRIVATE aether_core)
+if(AETHER_HAS_DLSS)
+	add_custom_command(TARGET AetherGraphicsNative POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AETHER_DLSS_DLL}" "$<TARGET_FILE_DIR:AetherGraphicsNative>")
+	if(EXISTS "${AETHER_DLSSD_DLL}")
+		add_custom_command(TARGET AetherGraphicsNative POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AETHER_DLSSD_DLL}" "$<TARGET_FILE_DIR:AetherGraphicsNative>")
+	else()
+		message(WARNING "nvngx_dlssd.dll not found (${AETHER_DLSSD_DLL}): DLSS Ray Reconstruction will be unavailable (scripts/fetch-deps.ps1)")
+	endif()
+endif()
 
 # Aether's own loader (version.dll in the game folder, beside KSL): in a folder of its own, so that nothing built here
 # picks it up as the system's version.dll

@@ -1,4 +1,5 @@
 #include "Bvh.h"
+#include "Dlss.h"
 #include "ReflectionDenoiser.h"
 #include "LightingDenoiser.h"
 #include "SceneRenderer.h"
@@ -14,6 +15,9 @@ namespace aether {
 namespace {
 
 const DXGI_FORMAT kSceneColorFormat = DXGI_FORMAT_R11G11B10_FLOAT;
+// the path tracer's targets for DLSS Ray Reconstruction (PSPathTraceRr, in this order): the noisy picture, the diffuse
+// and specular albedo, the world space normal with the roughness in w, the first specular bounce's hit distance
+const DXGI_FORMAT kPtRrFormats[5] = {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16_FLOAT};
 const uint32_t kClusterX = 16, kClusterY = 9, kClusterZ = 24;
 const uint32_t kMaxLightsPerCluster = 64;
 // probe grid GI: probes around the camera on a grid fixed in the world (aether_scene.hlsli has the same numbers)
@@ -23,10 +27,13 @@ const uint32_t kGiTile = 8;                         // a probe's tile: 8 x 8 dir
 // (11: the GI probes' irradiance, 12: their distances)
 const uint32_t kGlobalsTableSize = 15; // (8: the reflection probes' atlas, 9: its blurred copy, 10: its depth, 13: the ray traced sun shadow, 14: the untraced casters' shadow map) shadow atlas, sky, sky irradiance, ambient occlusion | physical sky: sky (with clouds), transmittance LUT, multiple scattering LUT, cloud noise
 const uint32_t kPostTableSize = 4;    // per full screen pass: colour / main input, depth, two auxiliary inputs
-const float kExposureAdaptationRate = 2.0f; // per second: the automatic exposure covers 63 % of a change in half a second
+// per second: the automatic exposure covers 63 % of a change to a brighter scene in a third of a second, to a darker one
+// in a second and a quarter (eyes close down fast and open up slowly)
+const float kExposureBrightenRate = 3.0f;
+const float kExposureDarkenRate = 0.8f;
 const uint32_t kPostTables = 64;     // 0..3: ambient occlusion, its blur, composite, exposure metering; the rest handed out per pass (Fullscreen)
 const uint32_t kIrradianceSize = 32;  // octahedral map of the sky's diffuse light
-const char* const kFullscreenEntry[] = {"PSSky", "PSComposite", "PSAmbientOcclusion", "PSAmbientOcclusionBlur", "PSExposure", "PSIrradiance", "PSTaa", "PSMotionBlur", "PSBloomDown", "PSBloomUp", "PSSsr", "PSTransmittanceLut", "PSMultiScatterLut", "PSSkyViewLut", "PSCloudNoise", "PSSkyCloudsLut", "PSClouds", "PSVolumetricFog", "PSVolumetricFogApply", "PSReflectionBlur", "PSBvhDebug", "PSRayTrace", "PSGiRays", "PSGiIrradiance", "PSGiDepth", "PSLensFlare", "PSSmokeApply", "PSSunRays", "PSAoRays", "PSRcTrace", "PSRcIrradiance", "PSRcDepth", "PSPathTrace", "PSPathTraceApply"};
+const char* const kFullscreenEntry[] = {"PSSky", "PSComposite", "PSAmbientOcclusion", "PSAmbientOcclusionBlur", "PSExposure", "PSIrradiance", "PSTaa", "PSMotionBlur", "PSBloomDown", "PSBloomUp", "PSSsr", "PSTransmittanceLut", "PSMultiScatterLut", "PSSkyViewLut", "PSCloudNoise", "PSSkyCloudsLut", "PSClouds", "PSVolumetricFog", "PSVolumetricFogApply", "PSReflectionBlur", "PSBvhDebug", "PSRayTrace", "PSGiRays", "PSGiIrradiance", "PSGiDepth", "PSLensFlare", "PSSmokeApply", "PSSunRays", "PSAoRays", "PSRcTrace", "PSRcIrradiance", "PSRcDepth", "PSPathTrace", "PSPathTraceApply", "PSDlssMotion", "PSPathTraceRr"};
 // reflection probes: each is six square tiles (3 x 2: +X -X +Y | -Y +Z -Z); the atlas holds them 4 x 2
 const uint32_t kProbeFace = 128, kProbeBlurFace = 32;
 const float kProbeCell = 12.0f;      // the grid's spacing on the ground (m)
@@ -93,6 +100,7 @@ struct FrameConstants {
 	float giPrev[4];             // xyz: the same the frame before, w: 1 = the probes hold something
 	float giParams[4];           // x: metres between probes on the ground, y: in height, z: a different number every frame, w: number of punctual lights
 	float rayParams[4];          // x: 1 = rays this frame, y: 1 = the ray traced sun shadow is there for the opaque pass, z: tan of the sun's angular radius
+	float upscale[4];            // x: the material textures' mip bias (DLSS), yz: render size / output size, w: 1 = DLSS resolves this frame
 };
 
 // HDRP's "Custom" tone mapping is John Hable's piecewise filmic curve (toe, linear part, shoulder), with the parameters
@@ -162,7 +170,7 @@ void HableCurve(const float user[6], float curve[4], float segA[3][4], float seg
 	curve[0] = 1.0f / W;
 	curve[1] = x0;
 	curve[2] = x1;
-	curve[3] = 0.0f;
+	// (curve[3] is the exposure's darkening rate, set with the exposure)
 	for (int i = 0; i < 3; ++i) {
 		segA[i][0] = seg[i].offsetX; segA[i][1] = seg[i].offsetY; segA[i][2] = seg[i].scaleX; segA[i][3] = seg[i].scaleY;
 		segB[i][0] = seg[i].lnA; segB[i][1] = seg[i].B; segB[i][2] = segB[i][3] = 0.0f;
@@ -187,7 +195,7 @@ struct MaterialData {
 	// HDRP/LayeredLit: layers 1 .. 3 over layer 0 (the fields above), their textures read through g_SceneTextures
 	float layerInfo[4];      // x layer count (1: none), y the vertex colour with the mask (0 not, 1 multiplied, 2 added)
 	float layerMaskUv[4];    // scale xy, offset zw of the mesh's uv
-	uint32_t layerTex[12];   // heap indices (UINT32_MAX = none): mask, then per layer base, normal, mask
+	uint32_t layerTex[12];   // heap indices (UINT32_MAX = none): mask, then per layer base, normal, mask; [11] the material's own mask map (rays read it there)
 	float layerColor[3][4];
 	float layerParams[3][4]; // metallic, roughness, normal scale, mask layout
 	float layerUv[3][4];     // scale xy, offset zw of the mesh's uv
@@ -713,6 +721,14 @@ ID3D12PipelineState* SceneRenderer::FullscreenPipeline(FullscreenKind kind, DXGI
 	}
 	d.NumRenderTargets = 1;
 	d.RTVFormats[0] = sky ? kSceneColorFormat : format;
+	if (kind == kFullscreenPathTraceRr) {
+		// (the path tracer's guides for DLSS Ray Reconstruction: five targets of fixed formats)
+		d.NumRenderTargets = 5;
+		for (uint32_t i = 0; i < 5; ++i) {
+			d.RTVFormats[i] = kPtRrFormats[i];
+			d.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		}
+	}
 	d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	d.SampleDesc.Count = 1;
 	ComPtr<ID3D12PipelineState> pso;
@@ -851,6 +867,11 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 						if (t) {
 							t->lastUsedFrame = frame;
 						}
+					}
+					// (the mask map's place in the heap, for the ray traced passes, which have no bound textures: without it
+					// a Colormask material was untinted and all metal there, and a blue parked car came out a chrome mirror)
+					if (SceneTexture* mask = m.textures[kAeSlotMask] && m.maskLayout != kAeMaskNone ? store.Texture(m.textures[kAeSlotMask]) : nullptr) {
+						md.layerTex[11] = mask->srv != UINT32_MAX && mask->desc.dimension == kAeTexture2D ? mask->srv : UINT32_MAX;
 					}
 					material->frameIndex = materialCount_++;
 					material->frameStamp = frame;
@@ -1291,6 +1312,8 @@ void SceneRenderer::BuildClusters(const SceneFrame& scene) {
 		memcpy(d.colorInner, l.color, sizeof(l.color));
 		d.colorInner[3] = l.spotInnerCos;
 		d.typeFlags[0] = float(l.type);
+		// w: shadowed by rays (the scene marks the lamp as casting shadows; head lamps always do)
+		d.typeFlags[3] = lampShadows_ && (l.flags & (kAeLightCastsShadows | kAeLightHeadlamp)) != 0 ? 1.0f : 0.0f;
 		memcpy(&d.typeFlags[1], &l.layerMask, sizeof(uint32_t)); // rendering layers the light reaches (asuint)
 		float range = l.range;
 		if ((l.flags & kAeLightHeadlamp) && l.type == kAeLightSpot) {
@@ -1386,16 +1409,37 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 		historyValid_ = false; // another camera: nothing of the frame before applies
 		historyCamera_ = f.cameraId;
 	}
-	if (taa_) {
-		// a different sub pixel offset every frame (Halton 2, 3 over 8 frames): the frames average to an antialiased picture
+	// (the scene up to the temporal resolve is drawn at the render size: smaller than the target with DLSS super resolution)
+	const uint32_t rw = renderWidth_ ? renderWidth_ : target.width, rh = renderHeight_ ? renderHeight_ : target.height;
+	const bool dlss = taa_ && dlssMode_ != Dlss::kOff;
+	dlssJitter_[0] = dlssJitter_[1] = 0.0f;
+	// (path tracing denoised by DLSS Ray Reconstruction: the same jitter as DLAA, which RR's guide asks for like DLSS's.
+	// The whole frame is drawn with it, the depth and the surface the path tracer starts from among it, and the eye's
+	// rays go through the jittered pixel centres)
+	if (taa_ || ptRr_) {
+		// a different sub pixel offset every frame (Halton 2, 3): the frames average to an antialiased picture. TAA and
+		// DLAA cycle through 8 offsets; DLSS super resolution through 8 per output pixel a render pixel covers (8 x the
+		// area ratio: 18 at Quality, 32 at Performance, 72 at Ultra Performance), as NVIDIA's guide asks
 		auto halton = [](uint32_t i, uint32_t base) { float r = 0, fr = 1; while (i > 0) { fr /= float(base); r += fr * float(i % base); i /= base; } return r; };
-		const uint32_t phase = uint32_t(frame_ % 8) + 1;
-		const float jx = (halton(phase, 2) - 0.5f) * 2.0f / float(target.width), jy = (halton(phase, 3) - 0.5f) * 2.0f / float(target.height);
+		const float area = float(target.width) * float(target.height) / std::max(float(rw) * float(rh), 1.0f);
+		const uint32_t phases = dlss ? std::max(8u, uint32_t(std::ceil(8.0f * area - 0.01f))) : 8u;
+		const uint32_t phase = uint32_t(frame_ % phases) + 1;
+		const float hx = halton(phase, 2) - 0.5f, hy = halton(phase, 3) - 0.5f;
+		const float jx = hx * 2.0f / float(rw), jy = hy * 2.0f / float(rh);
 		proj.at(0, 2) += jx * proj.at(3, 2);
 		proj.at(1, 2) += jy * proj.at(3, 2);
 		fc.jitter[0] = jx;
 		fc.jitter[1] = jy;
+		// (for DLSS: the same offset in render pixels, x to the right, y down: clip space y points up)
+		dlssJitter_[0] = hx;
+		dlssJitter_[1] = -hy;
 	}
+	// NVIDIA's mip bias for the material textures under DLSS: log2(render / output) - 1 (DLAA: -1)
+	mipBias_ = dlss ? std::log2(float(rw) / float(target.width)) - 1.0f : 0.0f;
+	fc.upscale[0] = mipBias_;
+	fc.upscale[1] = float(rw) / float(target.width);
+	fc.upscale[2] = float(rh) / float(target.height);
+	fc.upscale[3] = dlss ? 1.0f : 0.0f;
 	fc.jitter[2] = historyValid_ ? 1.0f : 0.0f;
 	// screen space reflections read the picture of the frame before (the temporal history): none without it
 	ssr_ = settings.ssr && f.ssrEnabled != 0 && taa_;
@@ -1519,6 +1563,7 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 		rcHistory_ = false;
 	}
 	fc.giParams[3] = float(punctualCount_); // (also read by the particles: with or without the probes)
+	fc.giParams[2] = float(frame_ % 4096); // (also the lamps' shadow rays' sequence)
 	fc.rayParams[0] = bvhReady_ ? 1.0f : 0.0f;
 	fc.rayParams[1] = rtLighting_ ? 1.0f : 0.0f;
 	// (the sun's angular radius, 0.27 degrees, at the default softness; the setting widens or narrows the penumbra)
@@ -1568,10 +1613,11 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 	fc.cameraPos[1] = f.cameraPosition[1];
 	fc.cameraPos[2] = f.cameraPosition[2];
 	fc.cameraPos[3] = f.time;
-	fc.screenSize[0] = float(target.width);
-	fc.screenSize[1] = float(target.height);
-	fc.screenSize[2] = 1.0f / float(target.width);
-	fc.screenSize[3] = 1.0f / float(target.height);
+	// (the size of what the passes up to the resolve draw; the post-processing reads its own from its targets)
+	fc.screenSize[0] = float(rw);
+	fc.screenSize[1] = float(rh);
+	fc.screenSize[2] = 1.0f / float(rw);
+	fc.screenSize[3] = 1.0f / float(rh);
 	const float zNear = std::max(f.nearPlane, 0.05f), zFar = std::min(std::max(f.farPlane, zNear * 2.0f), 500.0f);
 	fc.clusterCounts[0] = punctualCount_ ? float(kClusterX) : 0.0f;
 	fc.clusterCounts[1] = float(kClusterY);
@@ -1596,25 +1642,29 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 	ownExposure_ = false;
 	if (f.exposureMode == kAeExposureFixed) {
 		fc.exposure[0] = 1.0f / (1.2f * std::pow(2.0f, f.exposureFixedEV - f.exposureCompensation));
-	} else if (f.exposureMode == kAeExposureAutomatic) {
+	}
+	// autoExposure "always": a scene with a fixed exposure is metered too, inside a range round its own value
+	const bool forceAuto = settings.autoExposure == "always" && f.exposureMode == kAeExposureFixed;
+	if (f.exposureMode == kAeExposureAutomatic || forceAuto) {
 		ownExposure_ = true;
 		fc.exposure[1] = 2.0f;
-		fc.exposureParams[0] = f.exposureMinEV;
-		fc.exposureParams[1] = f.exposureMaxEV;
+		fc.exposureParams[0] = forceAuto ? f.exposureFixedEV - 2.5f : f.exposureMinEV;
+		fc.exposureParams[1] = forceAuto ? f.exposureFixedEV + 2.5f : f.exposureMaxEV;
 		fc.exposureParams[2] = f.exposureCompensation;
 		// how far this frame's metering moves the exposure towards what it measured (1: all the way, no value to start
 		// from). The metering of one frame alone follows every highlight that crosses the screen, which shows as flicker.
 		const auto now = std::chrono::steady_clock::now();
 		const float dt = std::clamp(std::chrono::duration<float>(now - exposureTime_).count(), 0.0f, 0.25f);
 		exposureTime_ = now;
-		fc.exposureParams[3] = exposureValid_ ? 1.0f - std::exp(-dt * kExposureAdaptationRate) : 1.0f;
+		fc.exposureParams[3] = exposureValid_ ? 1.0f - std::exp(-dt * kExposureBrightenRate) : 1.0f;
+		fc.toneCurve[3] = exposureValid_ ? 1.0f - std::exp(-dt * kExposureDarkenRate) : 1.0f;
 	}
 	// (Night is exposed darker than the meter asks: metered to the usual middle grey a moonlit yard looked like an
 	// overcast afternoon. 1.2 stops under, tried against 2.2: dark, with the lamps as the bright things in it.)
 	// (the game's post exposure is part of its colour grading: left out with hostGrading off)
 	fc.exposure[2] = std::pow(2.0f, settings.exposureEV + (settings.hostGrading ? f.postExposure : 0.0f));
 	// tone mapping: 0 none, 1 ACES, 2 neutral, 3 the host's custom curve, 4 AgX
-	float tone = settings.tonemap == "aces" ? 1.0f : settings.tonemap == "neutral" ? 2.0f : settings.tonemap == "agx" ? 4.0f : 0.0f;
+	float tone = settings.tonemap == "aces" ? 1.0f : settings.tonemap == "neutral" ? 2.0f : settings.tonemap == "agx" ? 4.0f : settings.tonemap == "agx_punchy" ? 5.0f : 0.0f;
 	if (settings.tonemap == "host" && !settings.hostGrading) {
 		tone = 4.0f; // the game's curve is off: Aether's own (AgX)
 	} else if (settings.tonemap == "host") {
@@ -1764,6 +1814,7 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 		face.screenSize[0] = face.screenSize[1] = float(kProbeFace);
 		face.screenSize[2] = face.screenSize[3] = 1.0f / float(kProbeFace);
 		face.jitter[0] = face.jitter[1] = face.jitter[2] = 0;
+		face.upscale[0] = face.upscale[3] = 0;
 		face.clusterCounts[0] = 0;
 		face.aoParams[3] = 0;
 		face.rayParams[1] = 0; // (the denoised sun shadow is the screen's: a probe face takes a ray of its own)
@@ -2058,6 +2109,47 @@ bool SceneRenderer::Fullscreen(RenderGraph::PassContext& ctx, FullscreenKind kin
 	return true;
 }
 
+bool SceneRenderer::FullscreenTargets(RenderGraph::PassContext& ctx, FullscreenKind kind, GpuTexture* const* outputs, uint32_t outputCount, GpuTexture* in0, GpuTexture* in1, GpuTexture* in2, const float* params) {
+	GpuResources& gpu = GpuResources::Get();
+	if (!outputs || outputCount == 0 || outputCount > 8 || !outputs[0]) {
+		ctx.note = "no targets";
+		return false;
+	}
+	ID3D12PipelineState* pso = FullscreenPipeline(kind, outputs[0]->desc.targetFormat);
+	if (!pso || postNext_ >= kPostTables) {
+		ctx.note = "no pipeline";
+		return false;
+	}
+	const uint32_t table = postTable_ + kPostTableSize * postNext_++;
+	GpuTexture* inputs[3] = {in0, in1, in2};
+	for (uint32_t i = 0; i < 3; ++i) {
+		if (inputs[i]) {
+			gpu.CopySrv(table + i, inputs[i]->srv);
+		}
+	}
+	D3D12_CPU_DESCRIPTOR_HANDLE rtvs[8] = {};
+	for (uint32_t i = 0; i < outputCount; ++i) {
+		rtvs[i] = gpu.RtvCpu(outputs[i]->target);
+	}
+	const D3D12_VIEWPORT viewport = {0, 0, float(outputs[0]->desc.width), float(outputs[0]->desc.height), 0, 1};
+	const D3D12_RECT scissor = {0, 0, LONG(outputs[0]->desc.width), LONG(outputs[0]->desc.height)};
+	ctx.list->OMSetRenderTargets(outputCount, rtvs, FALSE, nullptr);
+	ctx.list->RSSetViewports(1, &viewport);
+	ctx.list->RSSetScissorRects(1, &scissor);
+	BindCommon(ctx.list, true);
+	ctx.list->SetGraphicsRootDescriptorTable(9, gpu.SrvGpu(table));
+	float constants[4] = {0, 0, 1.0f / float(outputs[0]->desc.width), 1.0f / float(outputs[0]->desc.height)};
+	if (params) {
+		memcpy(constants, params, sizeof(constants));
+	}
+	ctx.list->SetGraphicsRoot32BitConstants(1, 4, constants, 0);
+	ctx.list->SetPipelineState(pso);
+	ctx.list->DrawInstanced(3, 1, 0, 0);
+	ctx.drawCalls = 1;
+	ctx.triangles = 1;
+	return true;
+}
+
 // ------------------------------------------------------------------------------------------------ the frame
 
 bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list, const Target& target, bool draw, UINT64 retireFence, uint64_t frame, const SettingsData& settings) {
@@ -2139,20 +2231,66 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	// built (the same walk over the instances) and built after it
 	const bool pathTraceWanted = settings.pathTracing == "always" || (settings.pathTracing == "freeCamera" && Overlay::Get().FreeCamera());
 	raysWanted_ = settings.rayTracedReflections || settings.probeGi || settings.rayTracedLighting || settings.radianceCascades || settings.debugView == "bvh" || pathTraceWanted;
+	SceneBvh::Get().SetPoseBudget(uint32_t(std::clamp(settings.skinnedRayUpdates, 0.0f, 64.0f) + 0.5f));
 	SceneBvh::Get().BeginFrame(device_, list, retireFence, frame);
 	SceneBvh::Get().BeginInstances();
 	raysWanted_ = raysWanted_ && SceneBvh::Get().HasGeometry() && raysSupported_;
 	BuildDrawLists(scene, frame);
 	bvhReady_ = raysWanted_ && SceneBvh::Get().EndInstances(device_, list, retireFence);
 	pathTrace_ = pathTraceWanted && bvhReady_;
+	// ---- the path tracer's denoiser: DLSS Ray Reconstruction where it can run (Dlss logs why not, once)
+	ptRr_ = false;
+	ptDenoiserNote_.clear();
+	if (ptRrBroken_ && ptRrBrokenRevision_ != Settings::Get().Revision()) {
+		ptRrBroken_ = false; // (another setting: Ray Reconstruction is tried again)
+	}
+	if (pathTrace_ && settings.pathTracingDenoiser == "dlss_rr") {
+		if (ptRrBroken_) {
+			ptDenoiserNote_ = "DLSS Ray Reconstruction failed: the samples are averaged until a setting changes";
+		} else if (!Dlss::Built()) {
+			ptDenoiserNote_ = "built without DLSS: the samples are averaged";
+		} else if (!Dlss::Get().EnsureInit(device_) || !Dlss::Get().RrAvailable()) {
+			ptDenoiserNote_ = "DLSS Ray Reconstruction is not available (" + Dlss::Get().RrReason() + "): the samples are averaged";
+		} else {
+			ptRr_ = true;
+		}
+	}
+	// ---- the temporal resolve: Aether's TAA, or DLSS (DLAA at the full size, super resolution from a smaller render
+	// size). Not with path tracing (its average is antialiased by itself). Without DLSS: TAA (Dlss logs why, once).
+	renderWidth_ = target.width;
+	renderHeight_ = target.height;
+	dlssMode_ = Dlss::kOff;
+	upscalerNote_.clear();
+	Dlss& dlss = Dlss::Get();
+	dlss.Collect(completed);
+	if (dlssBroken_ && dlssBrokenFor_ != settings.upscaler) {
+		dlssBroken_ = false; // (another setting: DLSS is tried again)
+	}
+	const Dlss::Mode wantedDlss = settings.antialiasing && !pathTrace_ && !dlssBroken_ ? Dlss::ModeFromSetting(settings.upscaler) : Dlss::kOff;
+	if (wantedDlss != Dlss::kOff) {
+		uint32_t w = 0, h = 0;
+		if (dlss.EnsureInit(device_) && dlss.RenderSize(wantedDlss, target.width, target.height, w, h)) {
+			dlssMode_ = wantedDlss;
+			renderWidth_ = w;
+			renderHeight_ = h;
+		} else {
+			upscalerNote_ = "DLSS is not available: TAA";
+		}
+	} else if (dlssBroken_ && Dlss::ModeFromSetting(settings.upscaler) != Dlss::kOff) {
+		upscalerNote_ = "DLSS failed for this setting: TAA";
+	} else if (Dlss::Built() && !dlss.InitTried() && Overlay::Get().Visible()) {
+		dlss.EnsureInit(device_); // (the settings show whether DLSS can be chosen: asked once, when the overlay is open)
+	}
+	const uint32_t rw = renderWidth_, rh = renderHeight_; // (the scene up to the resolve; the target's size from there on)
 	if (pathTrace_) {
-		// the running average: full size, 32 bit floats (a 16 bit average stops changing after a few hundred samples)
+		// the running average: full size, 32 bit floats (a 16 bit average stops changing after a few hundred samples).
+		// With Ray Reconstruction: none; its output instead (the render size is the target's: RR does not upscale here)
 		bool fresh = false;
 		for (auto& t : ptAccum_) {
-			if (t && (t->desc.width != target.width || t->desc.height != target.height)) {
+			if (t && (ptRr_ || t->desc.width != target.width || t->desc.height != target.height)) {
 				gpu.RetireTexture(std::move(t), retireFence, frame);
 			}
-			if (!t) {
+			if (!t && !ptRr_) {
 				GpuTextureDesc d;
 				d.width = target.width;
 				d.height = target.height;
@@ -2162,7 +2300,37 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 				fresh = true;
 			}
 		}
-		pathTrace_ = ptAccum_[0] && ptAccum_[1];
+		if (ptRrOut_ && (!ptRr_ || ptRrOut_->desc.width != target.width || ptRrOut_->desc.height != target.height)) {
+			gpu.RetireTexture(std::move(ptRrOut_), retireFence, frame);
+		}
+		if (ptRr_ && !ptRrOut_) {
+			GpuTextureDesc d;
+			d.width = target.width;
+			d.height = target.height;
+			d.format = d.targetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			d.unorderedAccess = true; // (DLSS writes it as a UAV)
+			ptRrOut_ = gpu.CreateTexture(d, "Scene.PathTraceDenoised", ResourceCategory::RenderTarget, Lifetime::Persistent, frame);
+			ptRrReset_ = true;
+		}
+		ptRr_ = ptRr_ && ptRrOut_ != nullptr;
+		pathTrace_ = ptRr_ || (ptAccum_[0] && ptAccum_[1]);
+		if (ptRr_) {
+			// Ray Reconstruction's history: anew on a camera cut (another camera, or a jump of over 20 m in a frame), a
+			// settings change or another size; kept while the camera moves (the point of it)
+			const float* pos = scene.frame.cameraPosition;
+			const float dx = pos[0] - ptRrPosition_[0], dy = pos[1] - ptRrPosition_[1], dz = pos[2] - ptRrPosition_[2];
+			const uint64_t revision = Settings::Get().Revision();
+			if (scene.frame.cameraId != ptRrCamera_ || dx * dx + dy * dy + dz * dz > 400.0f || revision != ptRrRevision_ || target.width != ptRrWidth_ || target.height != ptRrHeight_) {
+				ptRrReset_ = true;
+			}
+			ptRrCamera_ = scene.frame.cameraId;
+			ptRrRevision_ = revision;
+			ptRrWidth_ = target.width;
+			ptRrHeight_ = target.height;
+			memcpy(ptRrPosition_, pos, sizeof(ptRrPosition_));
+		} else {
+			ptRrReset_ = true;
+		}
 		// what the average was made for: the camera, the sun, the lamps, the settings
 		float key[40] = {};
 		memcpy(key, scene.frame.view, sizeof(float) * 16);
@@ -2185,7 +2353,9 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		}
 		if (changed) {
 			memcpy(ptKey_, key, sizeof(key));
-			ptSamples_ = 0;
+			if (!ptRr_) {
+				ptSamples_ = 0; // (with Ray Reconstruction it counts the frames since its own reset: the camera moving is no reason)
+			}
 		}
 	} else {
 		for (auto& t : ptAccum_) {
@@ -2193,11 +2363,16 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 				gpu.RetireTexture(std::move(t), retireFence, frame);
 			}
 		}
+		if (ptRrOut_) {
+			gpu.RetireTexture(std::move(ptRrOut_), retireFence, frame);
+		}
+		ptRr_ = false;
+		ptRrReset_ = true;
 		ptSamples_ = 0;
 	}
 	rayReflections_ = bvhReady_ && settings.rayTracedReflections;
 	nrdFrame_ = rayReflections_ && settings.reflectionDenoiser == "nrd" && ReflectionDenoiser::Available();
-	rtLighting_ = bvhReady_ && settings.rayTracedLighting && LightingDenoiser::Available() && LightingDenoiser::Get().Prepare(device_, target.width, target.height, retireFence, frame);
+	rtLighting_ = bvhReady_ && settings.rayTracedLighting && LightingDenoiser::Available() && LightingDenoiser::Get().Prepare(device_, rw, rh, retireFence, frame);
 	rtGi_ = rtLighting_ && settings.rayTracedGi;
 	untracedShadow_ = rtLighting_ && !untracedCasters_.empty() && shadowAtlas_ && shadowCascadeSize_ > 0;
 	if (untracedShadow_ && (!untracedAtlas_ || untracedAtlas_->desc.width != shadowCascadeSize_)) {
@@ -2215,6 +2390,7 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		untracedShadow_ = untracedAtlas_ != nullptr;
 	}
 	BuildCascades(scene, settings);
+	lampShadows_ = bvhReady_ && settings.lampShadows;
 	BuildClusters(scene);
 	if (!UploadFrameData(scene, target, settings)) {
 		return false;
@@ -2223,13 +2399,16 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	// ---- the frame as a graph
 	graph_.Begin(frame);
 	GpuTextureDesc colorDesc;
-	colorDesc.width = target.width;
-	colorDesc.height = target.height;
+	colorDesc.width = rw;
+	colorDesc.height = rh;
 	colorDesc.format = colorDesc.targetFormat = kSceneColorFormat;
 	colorDesc.renderTarget = true;
+	GpuTextureDesc postDesc = colorDesc; // (after the resolve: the target's size)
+	postDesc.width = target.width;
+	postDesc.height = target.height;
 	GpuTextureDesc depthDesc;
-	depthDesc.width = target.width;
-	depthDesc.height = target.height;
+	depthDesc.width = rw;
+	depthDesc.height = rh;
 	depthDesc.format = DXGI_FORMAT_R32_TYPELESS;
 	depthDesc.srvFormat = DXGI_FORMAT_R32_FLOAT;
 	depthDesc.targetFormat = DXGI_FORMAT_D32_FLOAT;
@@ -2246,8 +2425,9 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	const RenderGraph::ResourceId shadow = shadowAtlas_ ? graph_.Import(shadowAtlas_) : RenderGraph::kInvalid;
 	const RenderGraph::ResourceId backBuffer = graph_.ImportExternal("BackBuffer", target.backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	const bool shadows = !cascades_.empty();
-	const D3D12_VIEWPORT viewport = {0, 0, float(target.width), float(target.height), 0, 1};
-	const D3D12_RECT scissor = {0, 0, LONG(target.width), LONG(target.height)};
+	const D3D12_VIEWPORT viewport = {0, 0, float(rw), float(rh), 0, 1}; // (the passes up to the resolve)
+	const D3D12_RECT scissor = {0, 0, LONG(rw), LONG(rh)};
+	const D3D12_VIEWPORT outViewport = {0, 0, float(target.width), float(target.height), 0, 1};
 	const bool compare = settings.renderMode == "compare";
 
 	// (with ray traced shadows: the casters the rays cannot find, into a half size atlas of their own)
@@ -2369,8 +2549,8 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	});
 	// ---- screen space ambient occlusion: from the prepass depth, then a depth aware blur
 	GpuTextureDesc aoDesc;
-	aoDesc.width = target.width;
-	aoDesc.height = target.height;
+	aoDesc.width = rw;
+	aoDesc.height = rh;
 	aoDesc.format = aoDesc.targetFormat = kOcclusionFormat;
 	aoDesc.renderTarget = true;
 	aoDesc.clearColor[0] = aoDesc.clearColor[1] = aoDesc.clearColor[2] = aoDesc.clearColor[3] = 1.0f;
@@ -2551,8 +2731,8 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		rtAmbient = graph_.Import(lighting.Ambient());
 		rtShadow = graph_.Import(lighting.Shadow());
 		GpuTextureDesc sunDesc = colorDesc;
-		sunDesc.width = std::max((target.width + 1) / 2, 1u); // (a ray per 2 x 2 block)
-		sunDesc.height = std::max((target.height + 1) / 2, 1u);
+		sunDesc.width = std::max((rw + 1) / 2, 1u); // (a ray per 2 x 2 block)
+		sunDesc.height = std::max((rh + 1) / 2, 1u);
 		sunDesc.format = sunDesc.targetFormat = DXGI_FORMAT_R16_FLOAT;
 		const RenderGraph::ResourceId sunRays = graph_.CreateTransient("SceneSunRays", sunDesc, ResourceCategory::RenderTarget);
 		GpuTextureDesc aoRayDesc = sunDesc;
@@ -2670,14 +2850,19 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		// The rays are traced for one pixel of every 2 x 2 (a different one each frame, so that the temporal antialiasing
 		// gathers all four): a quarter of the rays. The reflection pass lays them over the full picture by depth.
 		// NRD's target for this size first: without it the rays are traced the way the reflection pass reads them directly
-		const std::shared_ptr<GpuTexture> denoisedTexture = rayReflections_ && nrdFrame_ ? ReflectionDenoiser::Get().Prepare(device_, target.width, target.height, retireFence, frame) : nullptr;
-		// z: 1 = the rays sample the surface's lobe and return their hit distance in a (for NRD), w: a number that changes every frame (their random sequence)
-		const float rayOffset[4] = {float(frame & 1), float((frame >> 1) & 1), denoisedTexture ? 1.0f : 0.0f, float(frame % 65536)};
+		// (setting reflectionResolution: "full" traces a ray for every pixel. With one for each 2 x 2 block the ray of a
+		// block landed on whichever of its pixels' surfaces came first: on fine shapes (a mesh wheel's spokes, the lip
+		// of a rim) a different one as the jitter moved, and the reflection crawled.)
+		const uint32_t rayStep = settings.reflectionResolution == "full" ? 1u : 2u;
+		const std::shared_ptr<GpuTexture> denoisedTexture = rayReflections_ && nrdFrame_ ? ReflectionDenoiser::Get().Prepare(device_, rw, rh, retireFence, frame, rayStep) : nullptr;
+		// x: pixels per ray along each axis, z: 1 = the rays sample the surface's lobe and return their hit distance in a
+		// (for NRD), w: a number that changes every frame (their random sequence)
+		const float rayOffset[4] = {float(rayStep), 0.0f, denoisedTexture ? 1.0f : 0.0f, float(frame % 65536)};
 		RenderGraph::ResourceId rays = RenderGraph::kInvalid;
 		if (rayReflections_) {
 			GpuTextureDesc rayDesc = colorDesc;
-			rayDesc.width = std::max((target.width + 1) / 2, 1u);
-			rayDesc.height = std::max((target.height + 1) / 2, 1u);
+			rayDesc.width = std::max((rw + rayStep - 1) / rayStep, 1u);
+			rayDesc.height = std::max((rh + rayStep - 1) / rayStep, 1u);
 			rayDesc.format = rayDesc.targetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // rgb what the ray brought back, a how far the surface is (0: no ray)
 			rays = graph_.CreateTransient("SceneReflectionRays", rayDesc, ResourceCategory::RenderTarget);
 			graph_.AddPass("ReflectionRays", true, [&, depth, surface, before, rays](RenderGraph::Builder& b) {
@@ -2707,8 +2892,8 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 					f.worldToViewPrev = nrdViewPrev_.m;
 					f.viewToClipPrev = nrdProjPrev_.m;
 					f.invViewProj = invViewProj_.m;
-					f.width = target.width;
-					f.height = target.height;
+					f.width = rw;
+					f.height = rh;
 					f.restart = !historyValid_;
 					f.retireFence = retireFence_;
 					ReflectionDenoiser::Get().Record(ctx.list, f, *ctx.Texture(depth), *ctx.Texture(surface), *ctx.Texture(velocity), *ctx.Texture(noisy), *ctx.Texture(denoised), ctx.note);
@@ -2738,8 +2923,8 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	const RenderGraph::ResourceId airSky = physicalSky_ ? graph_.Import(skyViewLut_) : RenderGraph::kInvalid;
 	if (clouds_) {
 		GpuTextureDesc cloudDesc = colorDesc;
-		cloudDesc.width = std::max(target.width / 2, 1u);
-		cloudDesc.height = std::max(target.height / 2, 1u);
+		cloudDesc.width = std::max(rw / 2, 1u);
+		cloudDesc.height = std::max(rh / 2, 1u);
 		cloudDesc.format = cloudDesc.targetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		cloudLayer = graph_.CreateTransient("SceneClouds", cloudDesc, ResourceCategory::RenderTarget);
 		graph_.AddPass("Clouds", true, [&, airSky, cloudLayer, depth](RenderGraph::Builder& b) {
@@ -2789,7 +2974,107 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	// ---- decal boxes (the cars' blob shadows): they darken whatever opaque surface lies inside them, found from the depth
 	// ---- path tracing: a sample per pixel into the running average, then the average over the picture (before what is
 	// blended over it: glass, fog, smoke and particles are the rasterised picture's)
-	if (pathTrace_) {
+	if (pathTrace_ && ptRr_) {
+		// ---- with DLSS Ray Reconstruction: every frame fresh paths (pathTracingSamplesPerFrame per pixel, averaged) over
+		// the rasterised picture by coverage, with the guides RR needs; the camera's motion as for DLSS; RR denoises
+		// (and antialiases) it into its output, which then takes the picture's place
+		if (ptRrReset_) {
+			ptSamples_ = 0;
+		}
+		GpuTextureDesc guideDescs[5];
+		RenderGraph::ResourceId guides[5];
+		static const char* const kGuideNames[5] = {"ScenePtNoisy", "ScenePtDiffuseAlbedo", "ScenePtSpecularAlbedo", "ScenePtNormalRoughness", "ScenePtSpecularHitDistance"};
+		for (uint32_t i = 0; i < 5; ++i) {
+			guideDescs[i] = colorDesc;
+			guideDescs[i].format = guideDescs[i].targetFormat = kPtRrFormats[i];
+			guides[i] = graph_.CreateTransient(kGuideNames[i], guideDescs[i], ResourceCategory::RenderTarget);
+		}
+		const int spp = std::clamp(settings.pathTracingSamplesPerFrame, 1, 4);
+		const float ptParams[4] = {float(spp), float(settings.pathTracingBounces), 0.0f, float(frame % 65536)};
+		graph_.AddPass("PathTrace", true, [&, guides](RenderGraph::Builder& b) {
+			b.Read(color, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Read(depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Read(surface, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			for (const RenderGraph::ResourceId g : guides) {
+				b.Write(g, D3D12_RESOURCE_STATE_RENDER_TARGET);
+			}
+		}, [&, guides, ptParams, spp](RenderGraph::PassContext& ctx) {
+			GpuTexture* outputs[5];
+			for (uint32_t i = 0; i < 5; ++i) {
+				outputs[i] = ctx.Texture(guides[i]);
+			}
+			FullscreenTargets(ctx, kFullscreenPathTraceRr, outputs, 5, ctx.Texture(color), ctx.Texture(depth), ctx.Texture(surface), ptParams);
+			ctx.note = Format("%d path%s per pixel, %d bounces, for DLSS Ray Reconstruction (frame %u since its reset)", spp, spp == 1 ? "" : "s", settings.pathTracingBounces, ptSamples_ + 1);
+		});
+		GpuTextureDesc motionDesc = colorDesc;
+		motionDesc.format = motionDesc.targetFormat = DXGI_FORMAT_R16G16_FLOAT;
+		const RenderGraph::ResourceId motion = graph_.CreateTransient("ScenePtMotion", motionDesc, ResourceCategory::RenderTarget);
+		graph_.AddPass("PathTraceMotion", true, [&, depth, velocity, motion](RenderGraph::Builder& b) {
+			b.Read(depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Read(velocity, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Write(motion, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		}, [&, depth, velocity, motion](RenderGraph::PassContext& ctx) {
+			Fullscreen(ctx, kFullscreenDlssMotion, ctx.Texture(motion), nullptr, ctx.Texture(depth), nullptr, nullptr, ctx.Texture(velocity));
+		});
+		const auto now = std::chrono::steady_clock::now();
+		const float frameMs = std::clamp(std::chrono::duration<float, std::milli>(now - dlssClock_).count(), 1.0f, 200.0f);
+		dlssClock_ = now;
+		const RenderGraph::ResourceId denoised = graph_.Import(ptRrOut_);
+		const bool reset = ptRrReset_;
+		// (the camera for RR's guides, in the row-vector convention NGX takes: Mat4 is stored column by column, which is
+		// that convention's matrix row by row; the projection without the jitter)
+		float worldToView[16], viewToClip[16];
+		memcpy(worldToView, nrdView_.m, sizeof(worldToView));
+		memcpy(viewToClip, nrdProj_.m, sizeof(viewToClip));
+		ptRrFailed_ = false;
+		graph_.AddPass("PathTraceDenoise", true, [&, guides, depth, motion, denoised](RenderGraph::Builder& b) {
+			for (const RenderGraph::ResourceId g : guides) {
+				b.Read(g, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			}
+			b.Read(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			b.Read(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			b.Write(denoised, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		}, [&, guides, depth, motion, denoised, reset, frameMs, worldToView, viewToClip, rw, rh](RenderGraph::PassContext& ctx) {
+			Dlss::RrInputs in;
+			in.color = ctx.Texture(guides[0])->resource.Get();
+			in.diffuseAlbedo = ctx.Texture(guides[1])->resource.Get();
+			in.specularAlbedo = ctx.Texture(guides[2])->resource.Get();
+			in.normalRoughness = ctx.Texture(guides[3])->resource.Get();
+			in.specularHitDistance = ctx.Texture(guides[4])->resource.Get();
+			in.depth = ctx.Texture(depth)->resource.Get();
+			in.motion = ctx.Texture(motion)->resource.Get();
+			in.output = ctx.Texture(denoised)->resource.Get();
+			in.width = rw;
+			in.height = rh;
+			in.jitterX = dlssJitter_[0];
+			in.jitterY = dlssJitter_[1];
+			in.worldToView = worldToView;
+			in.viewToClip = viewToClip;
+			in.reset = reset;
+			in.frameMs = frameMs;
+			if (!Dlss::Get().EvaluateRr(ctx.list, in, retireFence_, ctx.note)) {
+				// (this frame keeps the rasterised picture; from the next frame on the running average, until a setting changes)
+				ptRrFailed_ = true;
+				ptRrBroken_ = true;
+				ptRrBrokenRevision_ = Settings::Get().Revision();
+			}
+			ctx.dispatches = 1;
+		});
+		graph_.AddPass("PathTraceApply", true, [&, denoised](RenderGraph::Builder& b) {
+			b.Read(denoised, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Write(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		}, [&, denoised](RenderGraph::PassContext& ctx) {
+			if (ptRrFailed_) {
+				ctx.note = "Ray Reconstruction failed: the rasterised picture";
+				return;
+			}
+			const float applyParams[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // (x 1: the denoised picture, whole: the coverage is in it)
+			Fullscreen(ctx, kFullscreenPathTraceApply, ctx.Texture(color), ctx.Texture(denoised), nullptr, nullptr, applyParams);
+			ctx.note = "denoised by DLSS Ray Reconstruction";
+		});
+		ptRrReset_ = false;
+		++ptSamples_;
+	} else if (pathTrace_) {
 		const bool trace = ptSamples_ < uint32_t(settings.pathTracingMaxSamples);
 		const RenderGraph::ResourceId accumBefore = graph_.Import(ptAccum_[ptIndex_]), accumNow = graph_.Import(ptAccum_[ptIndex_ ^ 1u]);
 		if (trace) {
@@ -2816,6 +3101,7 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	}
 	ptActiveShown_.store(pathTrace_);
 	ptSamplesShown_.store(ptSamples_);
+	ptRrShown_.store(pathTrace_ && ptRr_);
 	graph_.AddPass("Decals", !decals_.empty() && !pathTrace_, [&](RenderGraph::Builder& b) {
 		b.Read(depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 		b.Write(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -2854,8 +3140,8 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	// shadow map and the clouds, the sky from all around), marched at half resolution, then laid over the picture
 	if (volumetricFog_) {
 		GpuTextureDesc fogDesc = colorDesc;
-		fogDesc.width = std::max(target.width / 2, 1u);
-		fogDesc.height = std::max(target.height / 2, 1u);
+		fogDesc.width = std::max(rw / 2, 1u);
+		fogDesc.height = std::max(rh / 2, 1u);
 		fogDesc.format = fogDesc.targetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		const RenderGraph::ResourceId fog = graph_.CreateTransient("SceneFog", fogDesc, ResourceCategory::RenderTarget);
 		graph_.AddPass("VolumetricFog", true, [&, depth, fog](RenderGraph::Builder& b) {
@@ -2888,11 +3174,11 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	for (const AeParticleBatch& batch : particleBatches_) {
 		smokeHalf = smokeHalf || isSmoke(batch);
 	}
-	smokeHalf = smokeHalf && particlesVa_ != 0 && target.width >= 64 && target.height >= 64;
+	smokeHalf = smokeHalf && particlesVa_ != 0 && rw >= 64 && rh >= 64;
 	if (smokeHalf) {
 		GpuTextureDesc smokeDesc = colorDesc;
-		smokeDesc.width = (target.width + 1) / 2;
-		smokeDesc.height = (target.height + 1) / 2;
+		smokeDesc.width = (rw + 1) / 2;
+		smokeDesc.height = (rh + 1) / 2;
 		smokeDesc.format = smokeDesc.targetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		const RenderGraph::ResourceId smoke = graph_.CreateTransient("SceneSmoke", smokeDesc, ResourceCategory::RenderTarget);
 		graph_.AddPass("Smoke", true, [&, smoke, depth](RenderGraph::Builder& b) {
@@ -3001,24 +3287,81 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	});
 	// ---- post-processing. `post` is the picture as it stands; every step that runs replaces it.
 	RenderGraph::ResourceId post = color;
-	// temporal antialiasing: this frame (drawn with a sub pixel offset) blended into the picture of the frames before
+	// temporal antialiasing: this frame (drawn with a sub pixel offset) blended into the picture of the frames before,
+	// by Aether's TAA or by DLSS. The resolved picture (the history) has the target's size: what reads the picture of
+	// the frame before (screen space reflections, the bounce light, the rays' screen lookups) reads it by uv.
 	const bool taa = taa_;
+	const bool dlssResolve = taa && dlssMode_ != Dlss::kOff;
+	if (taa && resolveByDlss_ != int(dlssResolve)) {
+		historyValid_ = false; // (TAA keeps a mask in the history's alpha that DLSS's output does not have)
+	}
+	resolveByDlss_ = taa ? int(dlssResolve) : -1;
 	if (taa) {
 		for (auto& h : history_) {
-			if (h && (h->desc.width != target.width || h->desc.height != target.height)) {
+			if (h && (h->desc.width != target.width || h->desc.height != target.height || !h->desc.unorderedAccess)) {
 				gpu.RetireTexture(std::move(h), retireFence, frame);
 				historyValid_ = false;
 			}
 			if (!h) {
-				GpuTextureDesc d = colorDesc;
+				GpuTextureDesc d = postDesc;
 				// (with an alpha channel, unlike the scene colour: it keeps whether the pixel showed something that moves by itself)
 				d.format = d.targetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+				d.unorderedAccess = true; // (DLSS writes it as a UAV)
 				h = gpu.CreateTexture(d, "Scene.History", ResourceCategory::RenderTarget, Lifetime::Persistent, frame);
 				historyValid_ = false;
 			}
 		}
 	}
-	if (taa && history_[0] && history_[1]) {
+	if (dlssResolve && history_[0] && history_[1]) {
+		// ---- DLSS: DLAA (1:1) or super resolution (render size -> the target's). Its motion vectors: the opaque pass's
+		// velocity where something was drawn, the camera's motion from the depth elsewhere (the sky), without the jitter
+		historyIndex_ ^= 1;
+		const RenderGraph::ResourceId current = graph_.Import(history_[historyIndex_]);
+		GpuTextureDesc motionDesc = colorDesc;
+		motionDesc.format = motionDesc.targetFormat = DXGI_FORMAT_R16G16_FLOAT;
+		const RenderGraph::ResourceId motion = graph_.CreateTransient("SceneDlssMotion", motionDesc, ResourceCategory::RenderTarget);
+		graph_.AddPass("DlssMotion", true, [&, depth, velocity, motion](RenderGraph::Builder& b) {
+			b.Read(depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Read(velocity, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Write(motion, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		}, [&, depth, velocity, motion](RenderGraph::PassContext& ctx) {
+			Fullscreen(ctx, kFullscreenDlssMotion, ctx.Texture(motion), nullptr, ctx.Texture(depth), nullptr, nullptr, ctx.Texture(velocity));
+		});
+		const auto now = std::chrono::steady_clock::now();
+		const float frameMs = std::clamp(std::chrono::duration<float, std::milli>(now - dlssClock_).count(), 1.0f, 200.0f);
+		dlssClock_ = now;
+		const bool reset = !historyValid_;
+		const Dlss::Mode mode = Dlss::Mode(dlssMode_);
+		graph_.AddPass("Dlss", true, [&, color, depth, motion, current](RenderGraph::Builder& b) {
+			b.Read(color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			b.Read(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			b.Read(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			b.Write(current, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		}, [&, color, depth, motion, current, reset, mode, frameMs, rw, rh](RenderGraph::PassContext& ctx) {
+			Dlss::Inputs in;
+			in.color = ctx.Texture(color)->resource.Get();
+			in.depth = ctx.Texture(depth)->resource.Get();
+			in.motion = ctx.Texture(motion)->resource.Get();
+			in.output = ctx.Texture(current)->resource.Get();
+			in.renderWidth = rw;
+			in.renderHeight = rh;
+			in.outWidth = target.width;
+			in.outHeight = target.height;
+			in.jitterX = dlssJitter_[0];
+			in.jitterY = dlssJitter_[1];
+			in.reset = reset;
+			in.frameMs = frameMs;
+			if (!Dlss::Get().Evaluate(ctx.list, mode, in, retireFence_, ctx.note)) {
+				// (this frame's picture is what the history held; from the next frame on TAA, until the setting changes)
+				dlssBroken_ = true;
+				dlssBrokenFor_ = settings.upscaler;
+				historyValid_ = false;
+			}
+			ctx.dispatches = 1;
+		});
+		post = current;
+		historyValid_ = true;
+	} else if (taa && history_[0] && history_[1]) {
 		historyIndex_ ^= 1;
 		const RenderGraph::ResourceId current = graph_.Import(history_[historyIndex_]), previous = graph_.Import(history_[historyIndex_ ^ 1]);
 		graph_.AddPass("TemporalAA", true, [&, color, depth, velocity, current, previous](RenderGraph::Builder& b) {
@@ -3037,7 +3380,7 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	}
 	// motion blur: along the way every still point of the world moved on screen since the frame before (the camera's motion)
 	if (motionBlur_ > 0.0f) {
-		const RenderGraph::ResourceId blurred = graph_.CreateTransient("SceneMotionBlur", colorDesc, ResourceCategory::RenderTarget);
+		const RenderGraph::ResourceId blurred = graph_.CreateTransient("SceneMotionBlur", postDesc, ResourceCategory::RenderTarget);
 		const RenderGraph::ResourceId source = post;
 		graph_.AddPass("MotionBlur", true, [&, source, depth, velocity, blurred](RenderGraph::Builder& b) {
 			b.Read(source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3056,7 +3399,7 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	if ((bloomMix_ > 0.0f || lensFlare_) && target.width >= 64 && target.height >= 64) {
 		RenderGraph::ResourceId down[kBloomLevels], up[kBloomLevels];
 		for (uint32_t i = 0; i < kBloomLevels; ++i) {
-			GpuTextureDesc d = colorDesc;
+			GpuTextureDesc d = postDesc;
 			d.width = std::max(1u, target.width >> (i + 1));
 			d.height = std::max(1u, target.height >> (i + 1));
 			down[i] = graph_.CreateTransient(i == 0 ? "Bloom.Down0" : i == 1 ? "Bloom.Down1" : i == 2 ? "Bloom.Down2" : i == 3 ? "Bloom.Down3" : "Bloom.Down4", d, ResourceCategory::RenderTarget);
@@ -3141,7 +3484,7 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	// composite adds it (after the temporal history was taken: it must not be carried into the next frame)
 	RenderGraph::ResourceId flare = RenderGraph::kInvalid;
 	if (lensFlare_ && flareSource != RenderGraph::kInvalid) {
-		GpuTextureDesc d = colorDesc;
+		GpuTextureDesc d = postDesc;
 		d.width = std::max(1u, target.width / 2);
 		d.height = std::max(1u, target.height / 2);
 		flare = graph_.CreateTransient("LensFlare", d, ResourceCategory::RenderTarget);
@@ -3189,7 +3532,7 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 			gpu.CopySrv(compositeTable + 1, ctx.Texture(flare)->srv);
 		}
 		ctx.list->OMSetRenderTargets(1, &target.backBufferRtv, FALSE, nullptr);
-		ctx.list->RSSetViewports(1, &viewport);
+		ctx.list->RSSetViewports(1, &outViewport);
 		// compare mode: the right half is Aether's, the left half stays the host's picture
 		const D3D12_RECT rect = {compare ? LONG(target.width / 2) : 0, 0, LONG(target.width), LONG(target.height)};
 		ctx.list->RSSetScissorRects(1, &rect);
@@ -3255,6 +3598,11 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	json stats = {
 		{"frame", frame},
 		{"resolution", {target.width, target.height}},
+		{"upscaler", {{"setting", settings.antialiasing ? settings.upscaler : std::string("off")}, {"active", !taa_ ? "none" : dlssMode_ != Dlss::kOff ? Dlss::ModeName(Dlss::Mode(dlssMode_)) : "taa"},
+			{"renderSize", {renderWidth_, renderHeight_}}, {"outputSize", {target.width, target.height}}, {"textureMipBias", mipBias_},
+			{"dlssAvailable", Dlss::Get().Available()}, {"note", upscalerNote_}}},
+		{"pathTracing", {{"active", pathTrace_}, {"denoiserSetting", settings.pathTracingDenoiser}, {"denoiser", !pathTrace_ ? "none" : ptRr_ ? "dlss_rr" : "average"},
+			{"samples", ptSamples_}, {"samplesPerFrame", settings.pathTracingSamplesPerFrame}, {"rrAvailable", Dlss::Get().RrAvailable()}, {"note", ptDenoiserNote_}}},
 		{"visibleInstances", instanceCount_},
 		{"materialsInFrame", materialCount_},
 		{"opaqueDraws", opaque_.size()},
@@ -3347,6 +3695,11 @@ void SceneRenderer::Release(bool leak) {
 	rc_ = rcHistory_ = false;
 	ptAccum_[0].reset();
 	ptAccum_[1].reset();
+	ptRrOut_.reset();
+	ptRr_ = false;
+	ptRrReset_ = true;
+	ptRrBroken_ = false;
+	ptRrShown_.store(false);
 	pathTrace_ = false;
 	ptSamples_ = 0;
 	ptActiveShown_.store(false);
@@ -3364,6 +3717,10 @@ void SceneRenderer::Release(bool leak) {
 	rtLighting_ = false;
 	ReflectionDenoiser::Get().Release(retireFence_, leak);
 	LightingDenoiser::Get().Release(retireFence_, leak);
+	Dlss::Get().Release(leak);
+	resolveByDlss_ = -1;
+	dlssMode_ = Dlss::kOff;
+	dlssBroken_ = false;
 	reflectionDepth_.reset();
 	probeGlobalsTable_ = UINT32_MAX;
 	atmosphereLutsValid_ = false;

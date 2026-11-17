@@ -2,6 +2,7 @@
 // Authorize (the MCP server's --allow-control switch, the mcpControl setting, the in-game approval) and then through
 // the same validated entry points the overlay uses. Nothing here touches the device or a resource's lifetime.
 #include "../Renderer/Bvh.h"
+#include "../Renderer/Dlss.h"
 #include "../Renderer/ReflectionDenoiser.h"
 #include "../Renderer/LightingDenoiser.h"
 #include "PipeServer.h"
@@ -224,6 +225,7 @@ json HandleRequest(const json& request) {
 		out["rayTracing"] = SceneBvh::Get().Stats();
 		out["reflectionDenoiser"] = ReflectionDenoiser::Get().Stats();
 		out["lightingDenoiser"] = LightingDenoiser::Get().Stats();
+		out["dlss"] = Dlss::Get().Stats();
 		return Ok(id, out);
 	}
 	if (method == "get_logs") {
@@ -311,7 +313,7 @@ json HandleRequest(const json& request) {
 	}
 	if (method == "set_graphics_option") {
 		// one of Aether's own graphics options (the same ones the overlay's Settings tab shows)
-		static const char* const kOptions[] = {"skyMode", "timeOfDay", "sunHeading", "cloudCoverage", "cloudSpeed", "shadowSoftness", "indirectStrength", "fogStrength", "moonlight", "skinnedRayUpdates", "motionBlurStrength", "bloomStrength", "aoStrength", "aoRadius", "lensFlareStrength", "smokeOpacity", "lodBias", "anisotropicLevel", "vsync", "exposureEV", "tonemap", "hostGrading", "reflectionDenoiser", "pathTracing", "pathTracingBounces", "pathTracingMaxSamples", "freeCameraSpeed", "freeCameraSensitivity"};
+		static const char* const kOptions[] = {"skyMode", "timeOfDay", "sunHeading", "cloudCoverage", "cloudSpeed", "shadowSoftness", "indirectStrength", "fogStrength", "moonlight", "skinnedRayUpdates", "motionBlurStrength", "bloomStrength", "aoStrength", "aoRadius", "lensFlareStrength", "smokeOpacity", "lodBias", "anisotropicLevel", "vsync", "exposureEV", "tonemap", "hostGrading", "reflectionDenoiser", "upscaler", "pathTracing", "pathTracingBounces", "pathTracingMaxSamples", "pathTracingDenoiser", "pathTracingSamplesPerFrame", "freeCameraSpeed", "freeCameraSensitivity"};
 		std::string option;
 		if (!GetString(params, "option", "", option, error)) {
 			return Fail(id, error);

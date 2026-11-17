@@ -4,6 +4,7 @@
 #include "Device/GpuInfo.h"
 #include "ImGui/Overlay.h"
 #include "Profiler/Profiler.h"
+#include "Renderer/Dlss.h"
 #include "Renderer/Renderer.h"
 #include "Renderer/SceneRenderer.h"
 #include "Resources/GpuResources.h"
@@ -45,6 +46,7 @@ json BuildStatus() {
 	j["phase"] = 2;
 	j["renderMode"] = Settings::Get().Snapshot().renderMode;
 	j["sceneRenderer"] = SceneRenderer::Get().Stats();
+	j["dlss"] = Dlss::Get().Stats(); // (NVIDIA DLSS: built, available, the last NGX call and its result, sizes)
 	double age = -1;
 	json managed = rt.ManagedState("managed", &age);
 	j["managed"] = managed; // what the C# mod reported about itself (KSL, Unity, graphics API, HDRP)

@@ -40,13 +40,18 @@ float4 WorldAt(int2 p, float depth) {
 	return mul(g_InvViewProj, float4(ndc, depth, 1.0));
 }
 
+// pixels per ray along each axis: 2 (one ray for each 2 x 2 block) or 1 (one per pixel), from the two sizes
+int2 RayStep() {
+	return max(int2(round(g_Size.xy / max(g_Size.zw, 1.0))), int2(1, 1));
+}
+
 [numthreads(8, 8, 1)]
 void CSPrepare(uint3 id : SV_DispatchThreadID) {
 	const uint2 x = id.xy;
 	if (any(x >= uint2(g_Size.zw))) {
 		return;
 	}
-	const int2 p = min(int2(x) * 2, int2(g_Size.xy) - 1); // (the pixel of the block the ray was traced for)
+	const int2 p = min(int2(x) * RayStep(), int2(g_Size.xy) - 1); // (the pixel of the block the ray was traced for)
 	const float depth = t_Depth.Load(int3(p, 0));
 	const float4 surface = t_Surface.Load(int3(p, 0));
 	const float4 ray = t_Rays.Load(int3(x, 0));
@@ -76,7 +81,7 @@ void CSResolve(uint3 id : SV_DispatchThreadID) {
 	if (any(x >= uint2(g_Size.zw))) {
 		return;
 	}
-	const int2 p = min(int2(x) * 2, int2(g_Size.xy) - 1);
+	const int2 p = min(int2(x) * RayStep(), int2(g_Size.xy) - 1);
 	const float depth = t_ResolveDepth.Load(int3(p, 0));
 	const float4 ray = t_ResolveRays.Load(int3(x, 0));
 	if (depth <= 0.0 || ray.a < 0.0) {
@@ -115,7 +120,7 @@ void CSLightPrepare(uint3 id : SV_DispatchThreadID) {
 	if (any(x >= uint2(g_Size.zw))) {
 		return;
 	}
-	const int2 p = min(int2(x) * 2, int2(g_Size.xy) - 1);
+	const int2 p = min(int2(x) * RayStep(), int2(g_Size.xy) - 1);
 	const float depth = t_LightDepth.Load(int3(p, 0));
 	const bool valid = depth > 0.0;
 	float viewZ = ViewZAt(p, valid ? depth : 0.5);

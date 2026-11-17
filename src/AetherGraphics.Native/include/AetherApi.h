@@ -89,6 +89,10 @@ AETHER_API int Aether_SceneMeshIndices(AeHandle mesh, const void* data, uint32_t
 AETHER_API void Aether_SceneMeshChanging(AeHandle mesh);
 // Instances of `alias` are traced as `mesh` (a skinned renderer's vertex buffers take turns: one tree serves them all).
 AETHER_API void Aether_SceneMeshAlias(AeHandle alias, AeHandle mesh);
+// A changing mesh whose later poses are taken on the GPU (call with Aether_SceneMeshChanging, before its geometry is
+// sent once): every frame the vertex buffer (stream 0) of the alias an instance uses is read for the pose, positions at
+// `positionOffset` as `positionFormat` (DXGI_FORMAT_R32G32B32_FLOAT or R32G32B32A32_FLOAT). Nothing is read back.
+AETHER_API void Aether_SceneMeshGpuPose(AeHandle mesh, uint32_t positionOffset, uint32_t positionFormat);
 // The ray tracing tree of a handle that is not a scene mesh (see above) goes. Scene meshes: Aether_SceneDestroy does it.
 AETHER_API void Aether_SceneMeshForget(AeHandle mesh);
 // Every tree goes (the set of loaded scenes changed): the caller sends the geometry of what is still there again.

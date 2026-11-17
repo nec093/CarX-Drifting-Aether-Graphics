@@ -11,6 +11,12 @@
 // geometry is sent. Its structure is built to be updated: every time new vertices arrive its triangles are taken
 // from them again, only that mesh's part of the pool is rewritten, and its structure is updated in place.
 //
+// A skinned mesh with a GPU pose (SetPoseLayout) is read back once only (indices, one pose, texture coordinates).
+// After that its pose is taken on the GPU: the instance's own mesh handle each frame is the alias whose vertex buffer
+// (Unity's skinned buffer, stream 0) holds this frame's pose, and a compute pass (shaders/bvh_pose.hlsl) writes the
+// mesh's triangles from it into the pool (corner and edges) and into a buffer of its own that its structure is then
+// updated from. At most `poseBudget` such meshes a frame, in turn (skinnedRayUpdates); 0: they are not traced.
+//
 // Threads: the Submit / Mark / Alias / Forget / Clear calls on the main thread, reading the triangles on the worker,
 // everything else on the render thread.
 #pragma once
@@ -64,15 +70,20 @@ public:
 	bool SubmitUvs(AeHandle mesh, const void* data, uint32_t bytes, uint32_t stride, uint32_t uvOffset, uint32_t uvFormat);
 	bool SubmitIndices(AeHandle mesh, const void* data, uint32_t bytes, uint32_t indexStride, const AeSubMesh* subMeshes, uint32_t subMeshCount);
 	void MarkChanging(AeHandle mesh);             // before its geometry is sent: its vertices will be sent again and again
+	// Before its geometry is sent (with MarkChanging): later poses are taken on the GPU from the vertex buffer (stream 0)
+	// of the alias an instance uses, positions at `positionOffset` in `positionFormat` (three or four 32 bit floats).
+	void SetPoseLayout(AeHandle mesh, uint32_t positionOffset, uint32_t positionFormat);
 	void Alias(AeHandle alias, AeHandle mesh);    // instances of `alias` are traced as `mesh` (a skinned renderer's vertex buffers take turns)
 	void Forget(AeHandle mesh);                   // the mesh (or alias) is gone
 	void Clear();                                 // scene unload: every mesh goes
 
 	// ---- render thread
+	// How many meshes with a GPU pose are refitted a frame (in turn). 0: they are not traced (not even in an old pose).
+	void SetPoseBudget(uint32_t meshes) { poseBudget_ = meshes; }
 	// Takes in what the worker finished and, when the pool changed, uploads it (recorded into `list`).
 	void BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT64 fence, uint64_t frame);
 	void BeginInstances();
-	// False: the mesh is not there for rays (yet): its triangles never came (skinned meshes by default) or are not uploaded.
+	// False: the mesh is not there for rays (yet): its triangles never came (skinned meshes with skinnedRayUpdates = 0) or are not uploaded.
 	bool AddInstance(AeHandle mesh, const Mat4& world, uint32_t skipSubMeshes, uint32_t materialOffset, uint32_t doubleSided, bool mirrored);
 	bool HasGeometry() const { return uploadedTris_ > 0; }
 	// Uploads this frame's instances and builds the structures: the bottom level ones this frame needs and has not
@@ -100,7 +111,7 @@ private:
 		std::vector<uint32_t> indices;
 		std::vector<uint32_t> triSubMesh;
 	};
-	struct Built { uint64_t generation = 0; AeHandle mesh = 0; bool refit = false; std::vector<BvhTri> tris; double ms = 0; bool changing = false; };
+	struct Built { uint64_t generation = 0; AeHandle mesh = 0; bool refit = false; std::vector<BvhTri> tris; double ms = 0; bool changing = false; std::vector<uint32_t> triVertices; uint32_t vertexCount = 0; };
 	// what the worker keeps of a changing mesh: which vertices each triangle uses
 	struct Topology { uint64_t generation = 0; uint32_t vertexCount = 0; std::vector<uint32_t> triVertices; std::vector<uint32_t> triSubMesh; std::vector<float> triUvs; /* six per triangle */ };
 	struct MeshEntry { uint32_t triBase = 0, triCount = 0; bool changing = false; };
@@ -112,6 +123,8 @@ private:
 	bool Complete(AeHandle mesh);
 	void Compact();
 	bool BuildStructures(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT64 fence);
+	void RefitPoses(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT64 fence);
+	bool EnsurePosePipeline(ID3D12Device* device, UINT64 fence);
 
 	// main thread only
 	struct Half { std::vector<uint8_t> vertices, indices, uvs; uint32_t stride = 0, positionOffset = 0, positionFormat = 0, indexStride = 0, uvMode = 0, uvStride = 0, uvOffset = 0, uvFormat = 0; std::vector<AeSubMesh> subMeshes; };
@@ -124,6 +137,8 @@ private:
 	std::deque<Job> jobs_;
 	std::vector<Built> built_;
 	std::vector<std::pair<AeHandle, AeHandle>> pendingAliases_;
+	struct PoseLayout { AeHandle mesh = 0; uint32_t positionOffset = 0, positionFormat = 0; };
+	std::vector<PoseLayout> pendingPoseLayouts_;
 	std::vector<AeHandle> pendingForget_;
 	std::thread worker_;
 	bool stop_ = false;
@@ -151,8 +166,32 @@ private:
 	std::vector<TlasInstance> instances_;
 	std::vector<Mat4> instanceWorld_;
 	std::vector<AeHandle> instanceMesh_; // (the mesh it uses, aliases resolved)
+	// render thread: meshes whose pose is taken on the GPU
+	struct GpuPose {
+		bool layout = false;                      // SetPoseLayout came
+		uint32_t positionOffset = 0, positionFormat = 0;
+		uint32_t vertexCount = 0;                 // of the pose read back (the skinned buffer must hold as many)
+		std::vector<uint32_t> triVertices;        // which vertices each triangle uses, in the pool's order (empty: no triangles yet)
+		ComPtr<ID3D12Resource> triVertexBuffer;   // the same on the GPU
+		ComPtr<ID3D12Resource> positions;         // three float3 per triangle: the structure's vertices (written by the pass)
+		AeHandle source = 0;                      // the alias instanced this frame: its vertex buffer has the frame's pose
+		uint64_t sourceFrame = 0;
+		bool posed = false;                       // `positions` was written
+		bool poolStale = true;                    // its part of the pool on the GPU holds an older pose than `positions`
+		uint64_t refitFrame = 0;
+	};
+	std::unordered_map<AeHandle, GpuPose> poses_;
+	std::atomic<uint32_t> poseBudget_{0};
+	AeHandle poseCursor_ = 0; // round robin: the last mesh refitted
+	uint64_t frame_ = 0;
+	ComPtr<ID3D12RootSignature> poseRoot_;
+	ComPtr<ID3D12PipelineState> posePipeline_;
+	uint64_t poseShaderGeneration_ = 0;
+	bool poseShaderFailed_ = false;
+	void RetirePose(GpuPose& pose, UINT64 fence);
 	// render thread: the structures
-	struct Blas { ComPtr<ID3D12Resource> buffer, scratch; uint32_t triCount = 0; bool updatable = false; };
+	// (vertexVa: the GPU pose buffer it was built from; 0: built from a copy of the pool)
+	struct Blas { ComPtr<ID3D12Resource> buffer, scratch; uint32_t triCount = 0; bool updatable = false; D3D12_GPU_VIRTUAL_ADDRESS vertexVa = 0; };
 	void RetireBlas(AeHandle mesh, UINT64 fence);
 	void RetireAllStructures(UINT64 fence);
 	int support_ = -1; // -1 not asked, 0 no, 1 yes
@@ -167,6 +206,10 @@ private:
 	double buildMsTotal_ = 0, refitMsLast_ = 0;
 	uint32_t uploads_ = 0, compactions_ = 0;
 	uint64_t frameInstanceTris_ = 0, partialUploads_ = 0, blasBytes_ = 0, blasBuilds_ = 0, blasUpdates_ = 0;
+	uint64_t poseRefitsTotal_ = 0;
+	uint32_t poseRefitsFrame_ = 0, poseCandidatesFrame_ = 0, poseSkipped_ = 0;
+	double poseCpuMs_ = 0;
+	std::string poseLastSkip_;
 };
 
 } // namespace aether

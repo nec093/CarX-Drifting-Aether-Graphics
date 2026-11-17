@@ -55,7 +55,7 @@ float4 VSShadow(VSInput input, uint instanceId : SV_InstanceID, out float2 uv : 
 // Depth only, for alpha tested materials (opaque ones have no pixel shader in the depth passes).
 void PSDepthAlphaTest(VSOutput input) {
 	MaterialData mat = g_Materials[g_MaterialIndex];
-	float alpha = g_BaseMap.Sample(s_Aniso, input.uv).a * mat.baseColor.a;
+	float alpha = SampleMaterial(g_BaseMap, input.uv).a * mat.baseColor.a;
 	clip(alpha - mat.params.z);
 }
 
@@ -81,14 +81,14 @@ PrepassOutput PSPrepass(VSOutput input, bool frontFace : SV_IsFrontFace) {
 
 PrepassOutput PSPrepassAlphaTest(VSOutput input, bool frontFace : SV_IsFrontFace) {
 	MaterialData mat = g_Materials[g_MaterialIndex];
-	float alpha = g_BaseMap.Sample(s_Aniso, input.uv).a * mat.baseColor.a;
+	float alpha = SampleMaterial(g_BaseMap, input.uv).a * mat.baseColor.a;
 	clip(alpha - mat.params.z);
 	return Prepass(input, frontFace);
 }
 
 void PSShadowAlphaTest(float4 position : SV_Position, float2 uv : TEXCOORD0) {
 	MaterialData mat = g_Materials[g_MaterialIndex];
-	float alpha = g_BaseMap.Sample(s_Aniso, uv).a * mat.baseColor.a;
+	float alpha = SampleMaterial(g_BaseMap, uv).a * mat.baseColor.a;
 	clip(alpha - mat.params.z);
 }
 
@@ -283,9 +283,16 @@ float HeadlampBeam(float3 d, float3 forward) {
 	return (spot + spread + near) * below + stray;
 }
 
+// Lamps' shadows from rays: at most this many shadowed lamps per pixel (the nearest in the cluster's order; the rest
+// light it unshadowed), each with one ray to a point on its bulb, a different point each frame (the temporal
+// antialiasing gathers them into a soft edge).
+static const uint kLampShadowRays = 4;
+static const float kLampRadius = 0.05; // metres: a bulb's size, for the penumbra
+
 float3 PunctualLights(Surface s, float3 worldPos, float3 V, float2 pixel, float viewDepth, uint layers, out uint lightCount) {
 	lightCount = 0;
 	float3 result = 0.0;
+	uint shadowRays = 0;
 	uint3 counts = (uint3)g_ClusterCounts.xyz;
 	if (counts.x == 0) {
 		return result;
@@ -319,7 +326,21 @@ float3 PunctualLights(Surface s, float3 worldPos, float3 V, float2 pixel, float 
 			attenuation *= smoothstep(outer, max(inner, outer + 1e-4), cosAngle);
 		}
 		if (attenuation > 0.0) {
-			result += DirectLight(s, V, L, light.colorInner.rgb * attenuation);
+			float visibility = 1.0;
+			// typeFlags.w: the lamp casts shadows and rays are on (setting lampShadows)
+			if (light.typeFlags.w > 0.5 && g_RayParams.x > 0.5 && shadowRays < kLampShadowRays && dot(s.normal, L) > 0.0) {
+				++shadowRays;
+				float seed = g_GiParams.z;
+				float3 jitter = float3(Hash31(float3(pixel, seed)), Hash31(float3(pixel, seed + 7.1)), Hash31(float3(pixel, seed + 13.7))) * 2.0 - 1.0;
+				float3 toPoint = toLight + jitter * kLampRadius;
+				float dist = length(toPoint);
+				// (stopping short of the lamp: its own reflector, lens and, for a head lamp, the car's front sit round it)
+				float stop = dist - (light.typeFlags.z > 0.5 ? 0.35 : 0.1);
+				if (stop > 0.05 && BvhOccluderDistance(worldPos + s.normal * 0.02, toPoint / dist, stop) >= 0.0) {
+					visibility = 0.0;
+				}
+			}
+			result += DirectLight(s, V, L, light.colorInner.rgb * (attenuation * visibility));
 		}
 	}
 	return result;
@@ -344,7 +365,7 @@ static const float3 kClassColors[14] = {
 // xy the normal (octahedral), z the roughness of the lobe that mirrors, w how much of the mirrored light it returns.
 // A texture of a material's extra layers (HDRP/LayeredLit), by its place in the SRV heap; `none` where it has none.
 float4 LayerTexture(uint index, float2 uv, float4 none) {
-	return index == 0xFFFFFFFFu ? none : g_SceneTextures[NonUniformResourceIndex(index)].Sample(s_Aniso, uv);
+	return index == 0xFFFFFFFFu ? none : g_SceneTextures[NonUniformResourceIndex(index)].SampleBias(s_Aniso, uv, g_Upscale.x);
 }
 
 float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
@@ -364,7 +385,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 		return float4(lerp(float3(1.0, 0.0, 1.0), float3(0.1, 0.0, 0.1), checker) * (0.35 + 0.65 * saturate(dot(n, g_SunDirection.xyz))) * 2.0, 1.0);
 	}
 
-	float4 base = g_BaseMap.Sample(s_Aniso, input.uv);
+	float4 base = SampleMaterial(g_BaseMap, input.uv);
 	Surface s;
 	float paintMirror = 0.0; // body paint: 1 = chrome
 	s.albedo = base.rgb * mat.baseColor.rgb;
@@ -375,7 +396,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	s.clearCoat = mat.params2.x;
 	s.clearCoatRoughness = mat.params2.y;
 	s.coatF0 = 0.04;
-	s.emissive = mat.emissiveMetallic.rgb * g_EmissiveMap.Sample(s_Aniso, input.uv).rgb;
+	s.emissive = mat.emissiveMetallic.rgb * SampleMaterial(g_EmissiveMap, input.uv).rgb;
 
 	if (mat.params.z >= 0.0) {
 		clip(s.alpha - mat.params.z);
@@ -383,7 +404,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 
 	// ---- mask / pack map
 	if (mat.params3.y > 0.5) {
-		float4 m = g_MaskMap.Sample(s_Aniso, input.uv);
+		float4 m = SampleMaterial(g_MaskMap, input.uv);
 		if (mat.params3.x < 1.5) { // HDRP: R metallic, G occlusion, A smoothness
 			s.metallic *= m.r;
 			s.roughness = 1.0 - (1.0 - s.roughness) * m.a;
@@ -421,7 +442,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 			}
 		}
 		// layer 0 is what is above (its normal is read further down)
-		float3 n0 = mat.params3.z > 0.5 ? UnpackNormal(g_NormalMap.Sample(s_Aniso, input.uv), mat.params.y) : float3(0.0, 0.0, 1.0);
+		float3 n0 = mat.params3.z > 0.5 ? UnpackNormal(SampleMaterial(g_NormalMap, input.uv), mat.params.y) : float3(0.0, 0.0, 1.0);
 		float3 albedo = s.albedo * weights[0], normal = n0 * weights[0];
 		float metallic = s.metallic * weights[0], roughness = s.roughness * weights[0], occlusion = s.occlusion * weights[0];
 		[unroll] for (int l = 0; l < 3; ++l) {
@@ -462,18 +483,18 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 		// of the material's colours, by that colour's alpha. Without the map the base colour is not a tint at all.
 		s.albedo = base.rgb;
 		if (mat.params3.w > 0.5) {
-			float3 mask = g_ExtraMap.Sample(s_Aniso, input.uv).rgb;
+			float3 mask = SampleMaterial(g_ExtraMap, input.uv).rgb;
 			s.albedo = lerp(s.albedo, base.rgb * mat.baseColor.rgb, mask.r * mat.baseColor.a);
 			s.albedo = lerp(s.albedo, base.rgb * mat.secondaryColor.rgb, mask.g * mat.secondaryColor.a);
 		}
 	} else if (materialClass == CLASS_COLOR_MASK) {
 		// the game's Colormask graph: the mask map's B channel says where the base colour tints (R metallic, G occlusion,
 		// A smoothness as in HDRP's mask map; checked against the game's textures)
-		float tintMask = mat.params3.y > 0.5 ? g_MaskMap.Sample(s_Aniso, input.uv).b : 1.0;
+		float tintMask = mat.params3.y > 0.5 ? SampleMaterial(g_MaskMap, input.uv).b : 1.0;
 		s.albedo = base.rgb * lerp(1.0, mat.baseColor.rgb, tintMask);
 	} else if (materialClass == CLASS_VEHICLE_LIGHTS) {
 		// one light group per channel of the mask texture, switched by the material's four intensities
-		float4 groups = g_EmissiveMap.Sample(s_Aniso, input.uv);
+		float4 groups = SampleMaterial(g_EmissiveMap, input.uv);
 		s.emissive = base.rgb * dot(groups, max(mat.secondaryColor, 0.0)) * mat.emissiveMetallic.rgb;
 		if (AE_MATERIALS) {
 			// A lamp is behind a lens: smooth clear plastic or glass over everything the texture shows. (Without it a
@@ -489,7 +510,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 		// shade as much as in the sun. The strip's material carries no paint colour (white by default, and the game
 		// gives these renderers no property block), so drawing it as paint made every seam a white outline.
 		// Drawn as what it shows: a gap that swallows the light.
-		float4 pack = g_MaskMap.Sample(s_Aniso, input.uv); // (read back from the game's texture: B is 1 along the seam and 0 at the strip's edges, R falls towards the seam)
+		float4 pack = SampleMaterial(g_MaskMap, input.uv); // (read back from the game's texture: B is 1 along the seam and 0 at the strip's edges, R falls towards the seam)
 		s.albedo = 0.01;
 		s.metallic = 0.0;
 		s.roughness = 1.0;
@@ -523,7 +544,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	if (mat.params3.z > 0.5 || layered) {
 		float3 T = normalize(input.tangent.xyz - N * dot(N, input.tangent.xyz));
 		float3 B = cross(N, T) * input.tangent.w;
-		float3 n = layered ? layerTangentNormal : UnpackNormal(g_NormalMap.Sample(s_Aniso, input.uv), mat.params.y);
+		float3 n = layered ? layerTangentNormal : UnpackNormal(SampleMaterial(g_NormalMap, input.uv), mat.params.y);
 		N = normalize(T * n.x + B * n.y + N * n.z);
 	}
 	if (!outside) {
@@ -531,7 +552,10 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	}
 	s.normal = N;
 	s.coatNormal = N;
-	s.roughness = FilterRoughness(N, clamp(s.roughness, 0.03, 1.0));
+	// (Metal is filtered little too: on thin round shapes, a mesh wheel's spokes, the normal turns fast across every
+	// pixel and the full filter took a gold or chromed spoke to roughness 0.6 and more, an even flat colour where the
+	// path traced picture shows a mirror. The temporal antialiasing (or DLSS) keeps what is left of the shimmer.)
+	s.roughness = FilterRoughness(N, clamp(s.roughness, 0.03, 1.0), lerp(0.18, 0.015, saturate(s.metallic)));
 	// (Body paint's lacquer is filtered very little: on every curved panel the filter took the coat from a mirror to
 	// a satin finish, and the sun in the paint was a wide soft glow instead of a small bright image. What is left
 	// keeps the sun's image a few pixels wide, so that it does not flicker.)
@@ -668,18 +692,32 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	// Jimenez et al. 2016, the fit for many bounces. Without it white paint and pale concrete got grey, dirty creases.)
 	float3 bounceA = 2.0404 * s.albedo - 0.3324, bounceB = -4.7951 * s.albedo + 0.6417, bounceC = 2.7552 * s.albedo + 0.6903;
 	float3 diffuseVisibility = max(visibility, ((visibility * bounceA + bounceB) * visibility + bounceC) * visibility);
-	float3 ambient = ambientDiffuse * diffuseVisibility + ambientSpecular * SpecularOcclusion(NoV, visibility, s.roughness) + bounced;
+	// the layer whose reflection the reflection pass replaces with what rays find: the one that mirrors more
+	float coatShare = s.clearCoat > 0.0 ? (s.coatF0 + (1.0 - s.coatF0) * pow(1.0 - NoV, 5.0)) * s.clearCoat : 0.0;
+	float baseShare = dot(EnvBRDFApprox(f0, s.roughness, NoV), 1.0 / 3.0) * (1.0 - coatShare);
+	// Metal whose reflection the rays bring (ray traced reflections on, the reflection pass traces it up to roughness
+	// 0.75): no specular occlusion on it, here or in its weight. The rays meet what hides the surroundings themselves;
+	// occluded twice, a gold spoke deep in its wheel's dish had a weight of 0.17, was taken for a dielectric and kept
+	// the sky's even light, where the path traced picture shows its dish and its neighbours in it.
+	const bool tracedMetal = g_QualityParams.w > 0.5 && (g_DrawFlags & 2u) == 0u && s.metallic > 0.5 && s.roughness < 0.75 && baseShare > coatShare;
+	float baseOcclusion = tracedMetal ? 1.0 : SpecularOcclusion(NoV, visibility, s.roughness);
+	float3 ambient = ambientDiffuse * diffuseVisibility + ambientSpecular * baseOcclusion + bounced;
 	if (s.clearCoat > 0.0) {
 		float Fc = (s.coatF0 + (1.0 - s.coatF0) * pow(1.0 - NoV, 5.0)) * s.clearCoat;
 		ambient = ambient * (1.0 - Fc) + EnvironmentSpecular(input.worldPos, reflect(-V, s.coatNormal), s.clearCoatRoughness) * Fc * reflectionOcclusion;
 	}
 	float3 color = direct + ambient + s.emissive;
 	float alpha = s.alpha;
-	if (s.clearCoat > 0.0) {
+	if (s.clearCoat > 0.0 && coatShare >= baseShare) {
 		// the coat is what mirrors: its Fresnel term is the share of the mirrored light
-		surface = float4(OctEncode(s.coatNormal), s.clearCoatRoughness, saturate((s.coatF0 + (1.0 - s.coatF0) * pow(1.0 - NoV, 5.0)) * s.clearCoat * reflectionOcclusion));
+		surface = float4(OctEncode(s.coatNormal), s.clearCoatRoughness, saturate(coatShare * reflectionOcclusion));
+	} else if (s.clearCoat > 0.0) {
+		// metal under a coat (a lacquered gold or polished rim): the metal's reflection is far the larger (the coat
+		// returns a few percent): it is the one traced. (Tracing the coat left the metal lit by the sky alone: an even
+		// flat colour where the game's picture shows the wheel arch's dark and the ground's light.)
+		surface = float4(OctEncode(N), s.roughness, saturate(baseShare * (tracedMetal ? 1.0 : SpecularOcclusion(NoV, visibility, s.roughness))));
 	} else {
-		surface = float4(OctEncode(N), s.roughness, saturate(dot(EnvBRDFApprox(f0, s.roughness, NoV), 1.0 / 3.0) * reflectionOcclusion));
+		surface = float4(OctEncode(N), s.roughness, saturate(dot(EnvBRDFApprox(f0, s.roughness, NoV), 1.0 / 3.0) * (tracedMetal ? 1.0 : reflectionOcclusion)));
 	}
 
 	if (materialClass == CLASS_VEHICLE_GLASS) {

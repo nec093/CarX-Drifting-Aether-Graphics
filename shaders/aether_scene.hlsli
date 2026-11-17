@@ -56,6 +56,7 @@ cbuffer FrameConstants : register(b0) {
 	float4 g_GiPrev;             // xyz the same the frame before, w 1 = the probes hold something
 	float4 g_GiParams;           // x metres between probes on the ground, y in height, z a different number every frame, w number of punctual lights
 	float4 g_RayParams;          // x 1 = rays this frame (the structures are bound), y 1 = g_SunShadowMask holds the sun's visibility for the opaque pass, z tan of the sun's angular radius, w 1 = g_SunShadowUntraced holds the casters the rays cannot find
+	float4 g_Upscale;            // x the material textures' mip bias (DLSS: log2(render / output) - 1), yz render size / output size, w 1 = DLSS resolves this frame
 };
 
 cbuffer DrawConstants : register(b1) {
@@ -85,7 +86,7 @@ struct MaterialData {
 	// HDRP/LayeredLit: layers 1 .. 3 over layer 0 (the fields above); their textures in g_SceneTextures by heap index
 	float4 layerInfo;        // x layer count (1: none), y the vertex colour with the mask (0 not, 1 multiplied, 2 added)
 	float4 layerMaskUv;      // scale xy, offset zw of the mesh's uv
-	uint4 layerTex[3];       // heap indices (0xFFFFFFFF none): mask, then per layer base, normal, mask
+	uint4 layerTex[3];       // heap indices (0xFFFFFFFF none): mask, then per layer base, normal, mask; [2].w the material's own mask map (for rays)
 	float4 layerColor[3];
 	float4 layerParams[3];   // metallic, roughness, normal scale, mask layout
 	float4 layerUv[3];       // scale xy, offset zw of the mesh's uv
@@ -148,6 +149,12 @@ SamplerState s_Aniso : register(s0);
 SamplerState s_LinearClamp : register(s1);
 SamplerComparisonState s_Shadow : register(s2);
 SamplerState s_PointClamp : register(s3);
+
+// A material texture as the forward passes read it: with the mip bias DLSS asks for (g_Upscale.x; 0 without DLSS), so
+// that a picture drawn at a smaller size keeps the texture detail of the output size.
+float4 SampleMaterial(Texture2D t, float2 uv) {
+	return t.SampleBias(s_Aniso, uv, g_Upscale.x);
+}
 
 // material classes (AeMaterialClass)
 #define CLASS_UNSUPPORTED 0

@@ -185,19 +185,39 @@ float4 BvhHitAlbedoLevel(BvhHit hit, float level, out MaterialData mat) {
 	mat = g_Materials[entry.x];
 	uint cls = (uint)mat.params2.z;
 	float4 tex = 1.0;
+	float2 uv = (float2(tri.uvU, tri.uvV) + tri.duv1 * hit.bary.x + tri.duv2 * hit.bary.y) * mat.uvScaleOffset.xy + mat.uvScaleOffset.zw;
 	if (entry.y != 0xFFFFFFFFu) {
-		float2 uv = (float2(tri.uvU, tri.uvV) + tri.duv1 * hit.bary.x + tri.duv2 * hit.bary.y) * mat.uvScaleOffset.xy + mat.uvScaleOffset.zw;
 		tex = g_SceneTextures[NonUniformResourceIndex(entry.y)].SampleLevel(s_Aniso, uv, level);
 	}
 	if (mat.params.z >= 0.0 && tex.a * mat.baseColor.a < mat.params.z) {
 		return 0.0;
+	}
+	// The mask / pack map, read as the forward shader does (its heap index in layerTex[2].w, which no layer uses): it
+	// scales the metalness and roughness, and a Colormask material's B channel says where its colour tints. Applied to
+	// `mat` here, and params3.y cleared so the callers do not stand in for it again. (Without it a blue Colormask car,
+	// metallic 1 and smooth by its numbers, untinted, came out a white chrome mirror.)
+	float tintMask = 1.0;
+	uint maskIndex = mat.layerTex[2].w;
+	if (mat.params3.y > 0.5 && maskIndex < 65536u) {
+		float4 m = g_SceneTextures[NonUniformResourceIndex(maskIndex)].SampleLevel(s_Aniso, uv, level);
+		if (mat.params3.x < 1.5) { // HDRP: R metallic, G occlusion, A smoothness
+			mat.emissiveMetallic.a *= m.r;
+			mat.params.x = 1.0 - (1.0 - mat.params.x) * m.a;
+		} else { // the game's pack maps: R roughness, G metallic, B occlusion
+			mat.params.x *= m.r;
+			mat.emissiveMetallic.a *= m.g;
+		}
+		tintMask = m.b;
+		mat.params3.y = 0.0;
 	}
 	float3 albedo;
 	if (cls == CLASS_VEHICLE_PAINT) {
 		albedo = mat.baseColor.a > 0.5 ? lerp(mat.baseColor.rgb, tex.rgb, tex.a) : mat.baseColor.rgb; // (the texture is the livery)
 	} else if (cls == CLASS_VEHICLE_RIM) {
 		albedo = mat.baseColor.rgb;
-	} else if (cls == CLASS_VEHICLE_GENERIC || cls == CLASS_VEHICLE_TIRE || cls == CLASS_VEHICLE_LIGHTS || cls == CLASS_COLOR_MASK) {
+	} else if (cls == CLASS_COLOR_MASK) {
+		albedo = tex.rgb * lerp(1.0, mat.baseColor.rgb, tintMask); // (no readable mask: tinted all over, as the forward shader without one)
+	} else if (cls == CLASS_VEHICLE_GENERIC || cls == CLASS_VEHICLE_TIRE || cls == CLASS_VEHICLE_LIGHTS) {
 		albedo = tex.rgb;
 	} else {
 		albedo = tex.rgb * mat.baseColor.rgb;
@@ -210,7 +230,11 @@ float4 BvhHitAlbedo(BvhHit hit, float t, out MaterialData mat) {
 	return BvhHitAlbedoLevel(hit, 1.0 + 0.7 * log2(max(t, 1.0)), mat);
 }
 
-float4 BvhHitSurfaceLit(float3 P, BvhHit hit, float t, float3 d, bool punctual) {
+// `mirrorWeight` (out): for metal, what share of the light along its mirror direction it returns (f0 times how
+// metallic); `bounce`: the caller follows the mirror direction with a ray of its own, so the metal's mirrored part is
+// left out of the returned colour (else: the sky and the ground stand in for it).
+float4 BvhHitSurfaceShade(float3 P, BvhHit hit, float t, float3 d, bool punctual, bool bounce, out float3 mirrorWeight) {
+	mirrorWeight = 0.0;
 	MaterialData mat;
 	float4 colour = BvhHitAlbedo(hit, t, mat);
 	if (colour.a < 0.5) {
@@ -252,6 +276,11 @@ float4 BvhHitSurfaceLit(float3 P, BvhHit hit, float t, float3 d, bool punctual) 
 		}
 	}
 	float3 lit = saturate(albedo) * light;
+	if (punctual && cls != CLASS_VEHICLE_LIGHTS) {
+		// what glows (signs, screens, lit windows): its emission colour on the base texture (the emission map itself is
+		// not read here). (A car's lamps are lit by groups the forward shader works out: not here.)
+		lit += mat.emissiveMetallic.rgb * albedo;
+	}
 	// Metal has no colour of its own to light: it shows what it mirrors in turn. (Lit like paint, a chromed wheel
 	// seen in its own barrel, or in the car's door, was a white shape.) No second ray: the sky where its mirror
 	// direction looks up, and below the horizon the ground as the sun and the sky light it; half of it, for what a
@@ -262,11 +291,27 @@ float4 BvhHitSurfaceLit(float3 P, BvhHit hit, float t, float3 d, bool punctual) 
 		float3 ground = 0.12 * (AmbientDiffuse(float3(0.0, 1.0, 0.0)) * g_Misc.w + g_SunColor.rgb * (saturate(g_SunDirection.y) * sun / PI));
 		float3 mirrored = lerp(ground, SkyRadiance(r, 0.0), smoothstep(-0.05, 0.15, r.y));
 		float3 f0 = cls == CLASS_VEHICLE_RIM ? lerp(saturate(albedo), float3(0.55, 0.56, 0.58), smoothstep(0.6, 0.95, min(albedo.r, min(albedo.g, albedo.b)))) : saturate(albedo);
-		lit = lerp(lit, f0 * mirrored * 0.5, saturate(metal));
+		if (bounce) {
+			mirrorWeight = f0 * saturate(metal);
+			lit *= 1.0 - saturate(metal);
+		} else {
+			lit = lerp(lit, f0 * mirrored * 0.5, saturate(metal));
+		}
 	}
 	return float4(lit, 1.0);
 }
 
+float4 BvhHitSurfaceLit(float3 P, BvhHit hit, float t, float3 d, bool punctual) {
+	float3 unused;
+	return BvhHitSurfaceShade(P, hit, t, d, punctual, false, unused);
+}
+
 float4 BvhHitSurface(float3 P, BvhHit hit, float t, float3 d) {
 	return BvhHitSurfaceLit(P, hit, t, d, false);
+}
+
+// For what a reflection shows: lit by the lamps too, and with what glows; metal's mirrored part left to the caller's
+// next ray (mirrorWeight).
+float4 BvhHitSurfaceReflected(float3 P, BvhHit hit, float t, float3 d, out float3 mirrorWeight) {
+	return BvhHitSurfaceShade(P, hit, t, d, true, true, mirrorWeight);
 }

@@ -38,7 +38,7 @@ public:
 	};
 
 	// The quarter resolution target the reflection pass reads; made by Prepare for this size. Null: not usable.
-	std::shared_ptr<GpuTexture> Prepare(ID3D12Device* device, uint32_t width, uint32_t height, UINT64 retireFence, uint64_t frame);
+	std::shared_ptr<GpuTexture> Prepare(ID3D12Device* device, uint32_t width, uint32_t height, UINT64 retireFence, uint64_t frame, uint32_t step = 2); // step: pixels per ray along each axis (1 or 2)
 	// Records the three steps. The graph has put depth, surface, velocity and rays in NON_PIXEL_SHADER_RESOURCE and
 	// the output (Prepare's texture) in UNORDERED_ACCESS; those are not transitioned here.
 	bool Record(ID3D12GraphicsCommandList* list, const Frame& f, GpuTexture& depth, GpuTexture& surface, GpuTexture& velocity, GpuTexture& rays, GpuTexture& output, std::string& note);

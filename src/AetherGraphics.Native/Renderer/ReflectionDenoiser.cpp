@@ -22,7 +22,7 @@ ReflectionDenoiser& ReflectionDenoiser::Get() {
 #if !AETHER_HAS_NRD
 
 bool ReflectionDenoiser::Available() { return false; }
-std::shared_ptr<GpuTexture> ReflectionDenoiser::Prepare(ID3D12Device*, uint32_t, uint32_t, UINT64, uint64_t) { return nullptr; }
+std::shared_ptr<GpuTexture> ReflectionDenoiser::Prepare(ID3D12Device*, uint32_t, uint32_t, UINT64, uint64_t, uint32_t) { return nullptr; }
 bool ReflectionDenoiser::Record(ID3D12GraphicsCommandList*, const Frame&, GpuTexture&, GpuTexture&, GpuTexture&, GpuTexture&, GpuTexture&, std::string&) { return false; }
 void ReflectionDenoiser::Release(UINT64, bool) {}
 json ReflectionDenoiser::Stats() { return {{"available", false}, {"reason", "built without NRD (scripts/fetch-deps.ps1)"}}; }
@@ -49,7 +49,7 @@ struct ReflectionDenoiser::Impl {
 	bool failed = false; // (what cannot be made is not tried again every frame)
 	NrdInstance nrd;
 	ComPtr<ID3D12PipelineState> prepare, resolve;
-	uint32_t width = 0, height = 0, qw = 0, qh = 0;
+	uint32_t width = 0, height = 0, qw = 0, qh = 0, step = 2;
 	std::shared_ptr<GpuTexture> viewZ, normalRoughness, motion, specularIn, specularOut, output;
 	uint32_t frameIndex = 0;
 	bool restart = true;
@@ -68,7 +68,8 @@ struct ReflectionDenoiser::Impl {
 
 bool ReflectionDenoiser::Available() { return true; }
 
-std::shared_ptr<GpuTexture> ReflectionDenoiser::Prepare(ID3D12Device* device, uint32_t width, uint32_t height, UINT64 retireFence, uint64_t frame) {
+std::shared_ptr<GpuTexture> ReflectionDenoiser::Prepare(ID3D12Device* device, uint32_t width, uint32_t height, UINT64 retireFence, uint64_t frame, uint32_t step) {
+	step = std::clamp(step, 1u, 2u);
 	if (!impl_) {
 		impl_ = new Impl();
 	}
@@ -80,7 +81,7 @@ std::shared_ptr<GpuTexture> ReflectionDenoiser::Prepare(ID3D12Device* device, ui
 		Release(retireFence, false);
 		d.device = device;
 	}
-	if (d.nrd.Ready() && d.width == width && d.height == height && d.output) {
+	if (d.nrd.Ready() && d.width == width && d.height == height && d.step == step && d.output) {
 		return d.output;
 	}
 	// (NRD cannot be resized: a new instance and new textures for the new size, the history starts again)
@@ -88,8 +89,9 @@ std::shared_ptr<GpuTexture> ReflectionDenoiser::Prepare(ID3D12Device* device, ui
 	d.nrd.Release(retireFence, false);
 	d.width = width;
 	d.height = height;
-	d.qw = std::max((width + 1) / 2, 1u);
-	d.qh = std::max((height + 1) / 2, 1u);
+	d.step = step;
+	d.qw = std::max((width + step - 1) / step, 1u);
+	d.qh = std::max((height + step - 1) / step, 1u);
 	bool ok = d.nrd.Create(device, {{0, uint32_t(nrd::Denoiser::REBLUR_SPECULAR)}}, d.qw, d.qh, frame, "REBLUR_SPECULAR (reflections)");
 	if (ok) {
 		d.prepare = d.nrd.OwnPipeline(kNrdPrepare, sizeof(kNrdPrepare), "reflection prepare");

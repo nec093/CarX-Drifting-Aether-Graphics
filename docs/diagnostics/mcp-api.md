@@ -115,7 +115,7 @@ AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 
 ### set_graphics_option のオプション
 
-受け付けるのは次の 27 個です（`Api.cpp` の `kOptions`）。範囲の検証は設定と同じ（`src/AetherGraphics.Native/Core/Config.cpp`）です。
+受け付けるのは次の 29 個です（`Api.cpp` の `kOptions`）。範囲の検証は設定と同じ（`src/AetherGraphics.Native/Core/Config.cpp`）です。
 
 | オプション | 値 | 内容 |
 |---|---|---|
@@ -128,7 +128,7 @@ AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 | `indirectStrength` | 0〜3 | 照り返しの係数 |
 | `fogStrength` | 0〜20 | 霧の濃さの係数（物理の空では空気の霞、シーンの空ではシーンの霧に掛かる） |
 | `moonlight` | 0〜4 | 夜の月の光の係数 |
-| `skinnedRayUpdates` | 0〜4 | レイトレースの反射のために、毎フレーム GPU から姿勢を読み戻すスキンメッシュの数（既定 0。毎フレームの読み戻しは、しばらくするとゲームがフレームを飛ばす原因になる） |
+| `skinnedRayUpdates` | 0〜64 | 光線の構造（反射、GI、影）を毎フレーム GPU で今の姿勢に合わせるスキンメッシュ（車体、人物）の数。見えているものを順番に（既定 8。0 でスキンメッシュは光線の構造に入らない）。読み戻しはしない |
 | `motionBlurStrength` | 0〜2 | モーションブラーの強さ（シーンの値への係数） |
 | `bloomStrength` | 0〜2 | ブルームの強さ（シーンの値への係数） |
 | `aoStrength` | 0〜2 | アンビエントオクルージョンの強さ |
@@ -143,9 +143,12 @@ AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 | `hostGrading` | `true` / `false` | ゲームのトーンカーブとカラーグレーディング（ポスト露出、シャドウ / ミッドトーン / ハイライト）を使うか。`false` では `tonemap` の `host` は AgX になる |
 | `pathTracing` | `off` / `freeCamera` / `always` | パストレーシング：オフ、フリーカメラ（F11）の間だけ（既定）、常に |
 | `pathTracingBounces` | 1〜12（整数） | パストレーシングの経路のバウンス数（既定 4） |
-| `pathTracingMaxSamples` | 1〜100000（整数） | パストレーシングを重ねる画素あたりのサンプル数の上限（既定 4096） |
+| `pathTracingMaxSamples` | 1〜100000（整数） | パストレーシングを重ねる画素あたりのサンプル数の上限（既定 4096。`pathTracingDenoiser = off` のときだけ） |
+| `pathTracingDenoiser` | `dlss_rr` / `off` | パストレーシングのノイズ除去：NVIDIA DLSS Ray Reconstruction（既定、使えるとき）か、なし（サンプルの平均）。使えないときは平均。状態は `get_status` の `dlss.rr` と `sceneRenderer.pathTracing` |
+| `pathTracingSamplesPerFrame` | 1〜4（整数） | RR のとき、1 フレームに 1 画素で追う経路の数（フレームの中で平均してから RR に渡す。既定 1） |
 | `freeCameraSpeed` | 0.2〜100 | フリーカメラの速さ（m/s） |
 | `freeCameraSensitivity` | 0.01〜1 | フリーカメラのマウスの感度（度 / カウント） |
+| `upscaler` | `taa` / `dlaa` / `dlss_quality` / `dlss_balanced` / `dlss_performance` / `dlss_ultra_performance` | 時間方向の解決（`antialiasing` がオンのとき）：Aether の TAA（既定）、NVIDIA DLSS の DLAA（出力と同じサイズ）、DLSS 超解像（小さく描いて出力サイズへ）。DLSS が使えないときは TAA。状態は `get_status` の `dlss` と `sceneRenderer.upscaler` |
 | `reflectionDenoiser` | `nrd` / `off` | 既定 `nrd`：反射の光線を表面のローブからサンプリングし、NVIDIA NRD（REBLUR）でノイズ除去する。`off`：鏡面方向の光線、ノイズ除去なし。状態は `get_scene_info` の `reflectionDenoiser` |
 
 MCP から変えられない設定：`overlayHotkey`、`overlayVisibleAtStart`、`overlayScale`、`vramBudgetMB`、`vramWarnPercent`、`mcpControl`、`mcpApprovalTimeoutSec`、`logLevel`。`quality` は `set_render_quality`、`renderMode` と `debugView` は `set_render_mode` で変えます。

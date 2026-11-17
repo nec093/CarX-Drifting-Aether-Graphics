@@ -7,6 +7,8 @@
 #   AetherLoader\mods\AetherGraphics\mod.json, AetherGraphics.dll         the mod (its manifest and code)
 #   AetherLoader\mods\AetherGraphics\native\AetherGraphicsNative.dll      the native runtime (the mod copies it to <Game>_Data\Plugins\x86_64 on start)
 #   AetherLoader\mods\AetherGraphics\native\dxcompiler.dll, dxil.dll      DXC for the DXR shaders (the Windows SDK's redistributables)
+#   AetherLoader\mods\AetherGraphics\native\nvngx_dlss.dll                NVIDIA DLSS (when built with the SDK; NGX loads it from here)
+#   AetherLoader\mods\AetherGraphics\native\nvngx_dlssd.dll               NVIDIA DLSS Ray Reconstruction (the path tracer's denoiser; likewise)
 #   AetherLoader\mods\AetherGraphics\shaders\*.hlsl, hdrp\aether_hdrp_dx12.bundle
 #   Settings: AetherLoader\config\nec093.aether.graphics. Logs, captures and benchmarks: the mod's folder.
 #   A BepInEx install (BepInEx\plugins\AetherGraphics) is moved in: its logs, captures, benchmarks and settings are kept,
@@ -121,6 +123,11 @@ foreach ($dxc in 'dxcompiler.dll', 'dxil.dll') {
 	$from = Join-Path (Split-Path $native) $dxc
 	if (Test-Path $from) { Copy-Item -Force $from $nativeDir } else { Write-Host "note: $dxc not in the build folder: DXR shaders will not compile" }
 }
+# DLSS (copied beside the build by CMake when the SDK is in build\deps): NGX loads it from the mod's native folder
+$dlssDll = Join-Path (Split-Path $native) 'nvngx_dlss.dll'
+if (Test-Path $dlssDll) { Copy-Item -Force $dlssDll $nativeDir } else { Write-Host 'note: nvngx_dlss.dll not in the build folder: DLSS / DLAA are not available (scripts\fetch-deps.ps1)' }
+$dlssdDll = Join-Path (Split-Path $native) 'nvngx_dlssd.dll'
+if (Test-Path $dlssdDll) { Copy-Item -Force $dlssdDll $nativeDir } else { Write-Host 'note: nvngx_dlssd.dll not in the build folder: DLSS Ray Reconstruction is not available (scripts\fetch-deps.ps1)' }
 Copy-Item -Force (Join-Path $repo 'shaders\*') (Join-Path $modData 'shaders')
 # HDRP's compute shaders for DX12 (scripts\build-hdrp-bundle.ps1): without them the game's own renderer shows nothing on DX12
 $bundle = Join-Path $repo 'build\unity\aether_hdrp_dx12.bundle'

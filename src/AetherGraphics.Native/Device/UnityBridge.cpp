@@ -332,6 +332,7 @@ AETHER_API void Aether_SceneDestroy(int kind, AeHandle handle) {
 AETHER_API void Aether_SetSceneNight(int night) { SceneRenderer::Get().SetSceneNight(night != 0); }
 AETHER_API void Aether_SceneMeshChanging(AeHandle mesh) { SceneBvh::Get().MarkChanging(mesh); }
 AETHER_API void Aether_SceneMeshAlias(AeHandle alias, AeHandle mesh) { SceneBvh::Get().Alias(alias, mesh); }
+AETHER_API void Aether_SceneMeshGpuPose(AeHandle mesh, uint32_t positionOffset, uint32_t positionFormat) { SceneBvh::Get().SetPoseLayout(mesh, positionOffset, positionFormat); }
 AETHER_API void Aether_SceneMeshForget(AeHandle mesh) { SceneBvh::Get().Forget(mesh); }
 AETHER_API void Aether_SceneClear(void) {
 	SceneStore::Get().Clear();

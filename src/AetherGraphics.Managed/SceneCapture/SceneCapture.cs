@@ -47,7 +47,9 @@ namespace AetherGraphics {
 			// buffer is a mesh of its own on the native side, and the instance is pointed at this frame's one
 			public Dictionary<IntPtr, uint> skinnedVariants;
 			public uint rayKey;                 // skinned: the handle its ray tracing tree is kept under (every vertex buffer variant is traced as this)
-			public bool rayIndicesSent, rayReading;
+			public bool rayReading;                // its one geometry readback is under way
+			public Mesh rayMesh;                   // the mesh rayKey's tree was made from
+			public int rayFailures;                // geometry readbacks that failed (given up after four)
 			public StaticBatch batch;           // set: drawn as part of its static batch's instance (StaticBatch)
 		}
 
@@ -1548,109 +1550,161 @@ namespace AetherGraphics {
 		private int geometryInFlight_, geometrySent_, geometryFailed_;
 		private uint geometryGeneration_;
 		private const int GeometryAtOnce = 8;
-		public string GeometryStatus => skinnedRayReads_ + " skinned poses read, " + geometrySent_ + " sent, " + geometryQueue_.Count + " waiting, " + geometryInFlight_ + " being read, " + geometryFailed_ + " failed";
+		public string GeometryStatus => skinnedRaySent_ + " skinned meshes sent once (pose on the GPU after that), " + skinnedRayFailed_ + " failed, " + geometrySent_ + " sent, " + geometryQueue_.Count + " waiting, " + geometryInFlight_ + " being read, " + geometryFailed_ + " failed";
 
 		// ---- skinned meshes for ray tracing. Their vertices change every frame (Unity skins on the GPU into the buffer the
-		// renderer draws from), so the tree is built once from the first pose read back, and after that the vertices are
-		// read back again and again, a couple of renderers per frame in turn, and the tree is refitted around them. The
-		// renderer's vertex buffers take turns (one per frame) under different mesh handles: all are traced as one tree.
-		private int skinnedRayCursor_;
-		private int skinnedRayReads_;
-		private int skinnedReadsPerFrame_ = 0;
+		// renderer draws from). Each renderer's geometry is read back once only (indices, one pose, texture coordinates):
+		// the tree is built from that. After that nothing is read back: the native side takes each frame's pose on the GPU
+		// from the skinned buffer the renderer's instance draws from this frame and refits the tree, skinnedRayUpdates
+		// renderers per frame in turn (Bvh.cpp, RefitPoses). (Reading the pose back every frame made Unity's frame fence
+		// fall behind: frames were skipped and the picture flickered.) The renderer's vertex buffers take turns (one per
+		// frame) under different mesh handles: all are traced as one tree (rayKey). 0: skinned meshes are not sent.
+		private int skinnedRaySent_, skinnedRayFailed_;
+		private bool skinnedRayOn_;
 		private float nextSkinnedSetting_;
+		private const int SkinnedSendsPerFrame = 2; // (new renderers whose one readback starts in a frame)
 
 		private unsafe void UpdateSkinnedGeometry() {
-			// (how many per frame is Aether's own setting, none without ray traced reflections; looked up once a second)
+			// (Aether's own setting, looked up once a second)
 			if (Time.unscaledTime >= nextSkinnedSetting_) {
 				nextSkinnedSetting_ = Time.unscaledTime + 1.0f;
-				skinnedReadsPerFrame_ = Native.Aether_SettingNumber("rayTracedReflections", 1) > 0.5 ? (int)Math.Round(Native.Aether_SettingNumber("skinnedRayUpdates", 0)) : 0;
+				skinnedRayOn_ = Native.Aether_SettingNumber("skinnedRayUpdates", 8) >= 0.5;
 			}
-			int count = skinnedTracked_.Count;
-			int first = count > 0 ? skinnedRayCursor_ % count : 0;
-			for (int step = 0, started = 0; step < count && started < skinnedReadsPerFrame_; ++step) {
-				Tracked t = skinnedTracked_[(first + step) % count];
+			if (!skinnedRayOn_) {
+				return;
+			}
+			int started = 0;
+			foreach (Tracked t in skinnedTracked_) {
+				if (started >= SkinnedSendsPerFrame) {
+					break;
+				}
 				if (!t.registered || t.mesh == null || t.skinned == null || t.rayReading || !meshes_.ContainsKey(t.meshHandle) || !t.renderer.isVisible) {
 					continue;
 				}
-				Mesh mesh = t.mesh;
-				uint generation = geometryGeneration_;
-				if (t.rayKey == 0) {
-					t.rayKey = VariantHandle(mesh, t.renderer, 7777777);
-					t.rayIndicesSent = false;
-					Native.Aether_SceneMeshChanging(t.rayKey);
-					if (t.skinnedVariants != null) {
-						foreach (uint variant in t.skinnedVariants.Values) {
-							Native.Aether_SceneMeshAlias(variant, t.rayKey);
-						}
-					}
+				if (t.rayKey != 0 && t.rayMesh != t.mesh) {
+					// another mesh on the renderer: its tree is made anew
+					Native.Aether_SceneMeshForget(t.rayKey);
+					t.rayKey = 0;
+					t.rayFailures = 0;
 				}
-				uint key = t.rayKey;
-				GraphicsBuffer vb = null;
+				if (t.rayKey != 0 || t.rayFailures >= 4) {
+					continue; // sent (or given up on)
+				}
+				Mesh mesh = t.mesh;
+				GraphicsBuffer vb = null, ib = null, ub = null;
 				try {
 					vb = t.skinned.GetVertexBuffer();
+					ib = mesh.GetIndexBuffer();
 				} catch (Exception) {
 				}
-				if (vb == null) {
+				if (vb == null || ib == null || mesh.subMeshCount < 1) {
+					vb?.Dispose();
+					ib?.Dispose();
 					continue;
 				}
 				// where the positions are in what skinning writes: at the start, three floats (when the buffer has the mesh's
 				// own layout for stream 0: where the mesh has them)
 				uint stride = (uint)vb.stride, positionOffset = 0, positionFormat = 6; // DXGI_FORMAT_R32G32B32_FLOAT
-				if (vb.stride == mesh.GetVertexBufferStride(0)) {
-					attributes_.Clear();
-					mesh.GetVertexAttributes(attributes_);
-					foreach (VertexAttributeDescriptor a in attributes_) {
-						if (a.attribute == VertexAttribute.Position && a.stream == 0) {
-							positionOffset = (uint)mesh.GetVertexAttributeOffset(a.attribute);
-							byte format = DxgiFormat(a.format, a.dimension);
-							positionFormat = format != 0 ? format : positionFormat;
-						}
+				int uvStream = -1, uvAt = 0;
+				byte uvKind = 0;
+				attributes_.Clear();
+				mesh.GetVertexAttributes(attributes_);
+				foreach (VertexAttributeDescriptor a in attributes_) {
+					if (a.attribute == VertexAttribute.Position && a.stream == 0 && vb.stride == mesh.GetVertexBufferStride(0)) {
+						positionOffset = (uint)mesh.GetVertexAttributeOffset(a.attribute);
+						byte format = DxgiFormat(a.format, a.dimension);
+						positionFormat = format != 0 ? format : positionFormat;
+					} else if (a.attribute == VertexAttribute.TexCoord0) {
+						uvStream = a.stream;
+						uvAt = mesh.GetVertexAttributeOffset(a.attribute);
+						uvKind = DxgiFormat(a.format, a.dimension);
 					}
 				}
-				if (!t.rayIndicesSent) {
-					int subMeshes = mesh.subMeshCount;
-					GraphicsBuffer ib = null;
+				// the texture coordinates: from the mesh's own stream that has them (skinning does not change them), unless
+				// reading them failed before
+				if (uvKind != 0 && uvStream >= 0 && t.rayFailures < 2) {
 					try {
-						ib = mesh.GetIndexBuffer();
+						ub = mesh.GetVertexBuffer(uvStream);
 					} catch (Exception) {
 					}
-					if (ib == null || subMeshes < 1) {
-						vb.Dispose();
-						continue;
-					}
-					AeSubMesh[] subs = new AeSubMesh[subMeshes];
-					for (int i = 0; i < subMeshes; ++i) {
-						SubMeshDescriptor sm = mesh.GetSubMesh(i);
-						subs[i].indexStart = (uint)sm.indexStart;
-						subs[i].indexCount = sm.topology == MeshTopology.Triangles ? (uint)sm.indexCount : 0u;
-						subs[i].baseVertex = (uint)sm.baseVertex;
-					}
-					uint indexStride = mesh.indexFormat == IndexFormat.UInt16 ? 2u : 4u;
-					t.rayIndicesSent = true;
-					AsyncGPUReadback.Request(ib, (AsyncGPUReadbackRequest r) => {
-						if (!r.hasError && generation == geometryGeneration_) {
-							var data = r.GetData<byte>();
-							fixed (AeSubMesh* p = subs) {
-								Native.Aether_SceneMeshIndices(key, Unity.Collections.LowLevel.Unsafe.NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(data), (uint)data.Length, indexStride, p, (uint)subs.Length);
-							}
-						} else {
-							t.rayIndicesSent = false;
-						}
-						ib.Dispose();
-					});
 				}
+				AeSubMesh[] subs = new AeSubMesh[mesh.subMeshCount];
+				for (int i = 0; i < subs.Length; ++i) {
+					SubMeshDescriptor sm = mesh.GetSubMesh(i);
+					subs[i].indexStart = (uint)sm.indexStart;
+					subs[i].indexCount = sm.topology == MeshTopology.Triangles ? (uint)sm.indexCount : 0u;
+					subs[i].baseVertex = (uint)sm.baseVertex;
+				}
+				uint indexStride = mesh.indexFormat == IndexFormat.UInt16 ? 2u : 4u;
+				uint uvMode = ub != null ? 2u : 0u, uvOffset = (uint)uvAt, uvFormat = uvKind, uvStride = ub != null ? (uint)mesh.GetVertexBufferStride(uvStream) : 0u;
+				uint generation = geometryGeneration_;
+				uint key = VariantHandle(mesh, t.renderer, 7777777);
+				t.rayKey = key;
+				t.rayMesh = mesh;
+				// before the geometry: the tree is to be refitted, its pose taken on the GPU, every buffer of the renderer traced as it
+				Native.Aether_SceneMeshChanging(key);
+				Native.Aether_SceneMeshGpuPose(key, positionOffset, positionFormat);
+				if (t.skinnedVariants != null) {
+					foreach (uint variant in t.skinnedVariants.Values) {
+						Native.Aether_SceneMeshAlias(variant, key);
+					}
+				}
+				int parts = ub != null ? 3 : 2;
+				bool failed = false;
 				t.rayReading = true;
 				++started;
-				AsyncGPUReadback.Request(vb, (AsyncGPUReadbackRequest r) => {
+				// (a part that fails: the tree is forgotten and the renderer tried again later, at most four times)
+				Action<bool> partDone = ok => {
+					failed |= !ok;
+					if (--parts > 0) {
+						return;
+					}
 					t.rayReading = false;
+					if (generation != geometryGeneration_) {
+						return;
+					}
+					if (failed) {
+						++skinnedRayFailed_;
+						++t.rayFailures;
+						if (t.rayKey == key) {
+							Native.Aether_SceneMeshForget(key);
+							t.rayKey = 0;
+						}
+					} else {
+						++skinnedRaySent_;
+					}
+				};
+				AsyncGPUReadback.Request(ib, (AsyncGPUReadbackRequest r) => {
+					bool ok = false;
 					if (!r.hasError && generation == geometryGeneration_) {
 						var data = r.GetData<byte>();
-						Native.Aether_SceneMeshVertices(key, Unity.Collections.LowLevel.Unsafe.NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(data), (uint)data.Length, stride, positionOffset, positionFormat, 0, 0, 0);
-						++skinnedRayReads_;
+						fixed (AeSubMesh* p = subs) {
+							ok = Native.Aether_SceneMeshIndices(key, Unity.Collections.LowLevel.Unsafe.NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(data), (uint)data.Length, indexStride, p, (uint)subs.Length) != 0;
+						}
+					}
+					ib.Dispose();
+					partDone(ok);
+				});
+				if (ub != null) {
+					AsyncGPUReadback.Request(ub, (AsyncGPUReadbackRequest r) => {
+						bool ok = false;
+						if (!r.hasError && generation == geometryGeneration_) {
+							var data = r.GetData<byte>();
+							ok = Native.Aether_SceneMeshUvs(key, Unity.Collections.LowLevel.Unsafe.NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(data), (uint)data.Length, uvStride, uvOffset, uvFormat) != 0;
+						}
+						ub.Dispose();
+						partDone(ok);
+					});
+				}
+				AsyncGPUReadback.Request(vb, (AsyncGPUReadbackRequest r) => {
+					bool ok = false;
+					if (!r.hasError && generation == geometryGeneration_) {
+						var data = r.GetData<byte>();
+						ok = Native.Aether_SceneMeshVertices(key, Unity.Collections.LowLevel.Unsafe.NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(data), (uint)data.Length, stride, positionOffset, positionFormat, uvMode, uvOffset, uvFormat) != 0;
 					}
 					vb.Dispose();
+					partDone(ok);
 				});
-				skinnedRayCursor_ = (first + step + 1) % count; // (the next frame goes on after the last one read)
 			}
 		}
 
@@ -1658,11 +1712,13 @@ namespace AetherGraphics {
 			++geometryGeneration_;
 			foreach (Tracked t in skinnedTracked_) {
 				t.rayKey = 0;
-				t.rayIndicesSent = false;
+				t.rayMesh = null;
+				t.rayFailures = 0; // (rayReading: cleared by the readbacks still under way, whose results are dropped)
 			}
 			geometryQueue_.Clear();
 			geometryAsked_.Clear();
 			geometrySent_ = geometryFailed_ = 0;
+			skinnedRaySent_ = skinnedRayFailed_ = 0;
 		}
 
 		private readonly Dictionary<int, bool> headlamps_ = new Dictionary<int, bool>();

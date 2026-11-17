@@ -8,12 +8,14 @@
 namespace aether {
 
 static const std::vector<std::string> kQualities = {"low", "medium", "high", "ultra"};
-static const std::vector<std::string> kFeatures = {"testTriangle", "gpuTiming", "shadows", "sky", "ssao", "antialiasing", "bloom", "motionBlur", "ssr", "particles", "volumetricFog", "indirectLight", "reflectionProbe", "rayTracedReflections", "followSceneNight", "probeGi", "lensFlare", "rayTracedLighting", "rayTracedGi", "radianceCascades"};
+static const std::vector<std::string> kFeatures = {"testTriangle", "gpuTiming", "shadows", "sky", "ssao", "antialiasing", "bloom", "motionBlur", "ssr", "particles", "volumetricFog", "indirectLight", "reflectionProbe", "rayTracedReflections", "followSceneNight", "probeGi", "lensFlare", "rayTracedLighting", "rayTracedGi", "radianceCascades", "lampShadows"};
 static const std::vector<std::string> kRenderModes = {"hdrp", "aether", "compare", "standalone"};
 static const std::vector<std::string> kSkyModes = {"physical", "scene"};
 static const std::vector<std::string> kPathTracingModes = {"off", "freeCamera", "always"};
-static const std::vector<std::string> kTonemaps = {"host", "agx", "aces", "neutral", "none"};
+static const std::vector<std::string> kPathTracingDenoisers = {"off", "dlss_rr"};
+static const std::vector<std::string> kTonemaps = {"host", "agx", "agx_punchy", "aces", "neutral", "none"};
 static const std::vector<std::string> kReflectionDenoisers = {"off", "nrd"};
+static const std::vector<std::string> kUpscalers = {"taa", "dlaa", "dlss_quality", "dlss_balanced", "dlss_performance", "dlss_ultra_performance"};
 static const std::vector<std::string> kControlModes = {"deny", "ask", "allow"};
 static const std::vector<std::string> kLogLevels = {"debug", "info", "warning", "error"};
 static const std::vector<std::string> kDebugViews = {"none", "albedo", "normal", "roughness", "metallic", "depth", "lighting", "shadow", "materialClass", "sun", "ambient", "reflection", "bvh"};
@@ -33,12 +35,16 @@ static json ToJsonData(const SettingsData& d) {
 		{"overlayHotkey", d.overlayHotkey},
 		{"overlayVisibleAtStart", d.overlayVisibleAtStart},
 		{"overlayScale", d.overlayScale},
+		{"overlayHud", d.overlayHud},
+		{"overlayTextScale", d.overlayTextScale},
 		{"freeCameraHotkey", d.freeCameraHotkey},
 		{"freeCameraSpeed", d.freeCameraSpeed},
 		{"freeCameraSensitivity", d.freeCameraSensitivity},
 		{"pathTracing", d.pathTracing},
 		{"pathTracingBounces", d.pathTracingBounces},
 		{"pathTracingMaxSamples", d.pathTracingMaxSamples},
+		{"pathTracingDenoiser", d.pathTracingDenoiser},
+		{"pathTracingSamplesPerFrame", d.pathTracingSamplesPerFrame},
 		{"quality", d.quality},
 		{"testTriangle", d.testTriangle},
 		{"gpuTiming", d.gpuTiming},
@@ -48,6 +54,7 @@ static json ToJsonData(const SettingsData& d) {
 		{"sky", d.sky},
 		{"ssao", d.ssao},
 		{"antialiasing", d.antialiasing},
+		{"upscaler", d.upscaler},
 		{"bloom", d.bloom},
 		{"motionBlur", d.motionBlur},
 		{"ssr", d.ssr},
@@ -58,6 +65,7 @@ static json ToJsonData(const SettingsData& d) {
 		{"probeGi", d.probeGi},
 		{"lensFlare", d.lensFlare},
 		{"rayTracedLighting", d.rayTracedLighting},
+		{"lampShadows", d.lampShadows},
 		{"rayTracedGi", d.rayTracedGi},
 		{"radianceCascades", d.radianceCascades},
 		{"followSceneNight", d.followSceneNight},
@@ -69,12 +77,14 @@ static json ToJsonData(const SettingsData& d) {
 		{"tonemap", d.tonemap},
 		{"hostGrading", d.hostGrading},
 		{"reflectionDenoiser", d.reflectionDenoiser},
+		{"reflectionResolution", d.reflectionResolution},
 		{"skyMode", d.skyMode},
 		{"timeOfDay", d.timeOfDay},
 		{"sunHeading", d.sunHeading},
 		{"cloudCoverage", d.cloudCoverage},
 		{"cloudSpeed", d.cloudSpeed},
 		{"exposureEV", d.exposureEV},
+		{"autoExposure", d.autoExposure},
 		{"vramBudgetMB", d.vramBudgetMB},
 		{"vramWarnPercent", d.vramWarnPercent},
 		{"mcpControl", d.mcpControl},
@@ -98,13 +108,17 @@ json Settings::Schema() {
 	return {
 		{"overlayHotkey", {{"type", "integer"}, {"minimum", 8}, {"maximum", 254}, {"description", "Windows virtual key code that shows / hides the overlay (default 121 = F10)"}}},
 		{"overlayVisibleAtStart", {{"type", "boolean"}, {"description", "Show the overlay when the game starts"}}},
+		{"overlayTextScale", {{"type", "number"}, {"minimum", 1.0}, {"maximum", 1.6}, {"description", "Overlay text size, on top of the UI scale"}}},
+		{"overlayHud", {{"type", "boolean"}, {"description", "A small frame rate readout in the corner while the overlay is closed"}}},
 		{"overlayScale", {{"type", "number"}, {"minimum", 0.5}, {"maximum", 3.0}, {"description", "Overlay UI scale"}}},
 		{"freeCameraHotkey", {{"type", "integer"}, {"minimum", 8}, {"maximum", 254}, {"description", "Windows virtual key code that switches the free camera on and off (default 122 = F11)"}}},
 		{"freeCameraSpeed", {{"type", "number"}, {"minimum", 0.2}, {"maximum", 100.0}, {"description", "Free camera speed in m/s (Shift: five times, Ctrl: a fifth)"}}},
 		{"freeCameraSensitivity", {{"type", "number"}, {"minimum", 0.01}, {"maximum", 1.0}, {"description", "Free camera mouse look, degrees per mouse count"}}},
 		{"pathTracing", oneOf(kPathTracingModes, "Path traced picture: off, freeCamera (while the free camera is on), always. The opaque scene is traced with the sun, the sky and the lamps over several bounces and averaged over the frames while nothing changes. Needs DXR 1.1")},
 		{"pathTracingBounces", {{"type", "integer"}, {"minimum", 1}, {"maximum", 12}, {"description", "Bounces of each path traced ray"}}},
-		{"pathTracingMaxSamples", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"description", "Samples per pixel after which the path traced picture stops being refined"}}},
+		{"pathTracingMaxSamples", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"description", "Samples per pixel after which the path traced picture stops being refined (only without a denoiser: DLSS Ray Reconstruction needs a fresh sample every frame)"}}},
+		{"pathTracingDenoiser", oneOf(kPathTracingDenoisers, "dlss_rr: NVIDIA DLSS Ray Reconstruction denoises a fresh path traced sample every frame (clean while the camera moves; also antialiases); off: the samples are averaged while nothing changes. dlss_rr needs an NVIDIA RTX GPU and nvngx_dlssd.dll next to the native runtime; without them it is off")},
+		{"pathTracingSamplesPerFrame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4}, {"description", "Paths per pixel each frame, averaged within the frame before DLSS Ray Reconstruction (more: less noise to denoise, slower)"}}},
 		{"quality", oneOf(kQualities, "Render quality preset")},
 		{"testTriangle", {{"type", "boolean"}, {"description", "Draw the DX12 integration test triangle"}}},
 		{"gpuTiming", {{"type", "boolean"}, {"description", "Measure GPU time with timestamp queries"}}},
@@ -113,7 +127,8 @@ json Settings::Schema() {
 		{"shadows", {{"type", "boolean"}, {"description", "Directional shadow cascades"}}},
 		{"sky", {{"type", "boolean"}, {"description", "Sky background and environment reflections"}}},
 		{"ssao", {{"type", "boolean"}, {"description", "Screen space ambient occlusion (strength, radius and effect on direct light follow the game's own settings)"}}},
-		{"antialiasing", {{"type", "boolean"}, {"description", "Temporal antialiasing"}}},
+		{"antialiasing", {{"type", "boolean"}, {"description", "Temporal antialiasing (off: no temporal resolve at all; upscaler is not used)"}}},
+		{"upscaler", oneOf(kUpscalers, "The temporal resolve while antialiasing is on: taa (Aether's own), dlaa (NVIDIA DLSS at the full size), dlss_quality / dlss_balanced / dlss_performance / dlss_ultra_performance (DLSS super resolution: the scene is drawn at a smaller size, DLSS writes the full size; post-processing runs at the full size). Needs an NVIDIA RTX GPU and nvngx_dlss.dll next to the native runtime; without them it is taa. Not with path tracing")},
 		{"bloom", {{"type", "boolean"}, {"description", "Bloom (intensity and scatter follow the game's own settings)"}}},
 		{"motionBlur", {{"type", "boolean"}, {"description", "Motion blur (intensity follows the game's own settings)"}}},
 		{"volumetricFog", {{"type", "boolean"}, {"description", "Fog lit by the sun through the shadow map (light shafts), where the scene has fog"}}},
@@ -122,18 +137,20 @@ json Settings::Schema() {
 		{"followSceneNight", {{"type", "boolean"}, {"description", "The physical sky turns to night (about midnight, moon up) while the game's own day / night switch is on night"}}},
 		{"lensFlare", {{"type", "boolean"}, {"description", "Lens flare: ghosts, a halo and rays from the sun and from bright lamps"}}},
 		{"rayTracedLighting", {{"type", "boolean"}, {"description", "The sun's shadow and the ambient occlusion (with the light bounced off nearby surfaces) from rays, denoised by NVIDIA NRD (SIGMA, REBLUR); off: the shadow map and screen space occlusion. Needs DXR 1.1"}}},
+		{"lampShadows", {{"type", "boolean"}, {"description", "Lamps and head lamps that cast shadows are shadowed by rays (up to four per pixel, soft by a 5 cm bulb). Needs DXR 1.1"}}},
 		{"rayTracedGi", {{"type", "boolean"}, {"description", "The opaque surfaces' ambient light per pixel from rays up to 60 m (the sky where they get out, the lit surface where they meet one), denoised with the occlusion (NRD REBLUR), instead of the cascades or the probes. Needs rayTracedLighting"}}},
 		{"radianceCascades", {{"type", "boolean"}, {"description", "The indirect light everywhere (the picture, what rays meet, glass, smoke, the reflection probes) from radiance cascades: five levels of probes round the camera over 96 x 32 x 96 m, merged into the light from every distance; no edge where the sky takes over. Replaces probeGi. Needs DXR 1.1"}}},
 		{"probeGi", {{"type", "boolean"}, {"description", "Indirect light from a grid of probes around the camera: each traces rays through the scene's triangles every frame (roofs shut out the sky, lit surfaces light their surroundings). Used when radianceCascades is off"}}},
 		{"rayTracedReflections", {{"type", "boolean"}, {"description", "Reflections on smooth surfaces from rays traced through the scene's triangles (what is off screen too)"}}},
 		{"moonlight", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 4.0}, {"description", "The moon's light at night, as a factor"}}},
 		{"fogStrength", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 20.0}, {"description", "Factor on the fog density: the air's own haze with the physical sky, else the scene's fog"}}},
-		{"skinnedRayUpdates", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 4.0}, {"description", "Skinned meshes whose pose is read back from the GPU per frame for ray traced reflections (0 = none, the default: reading every frame makes the game skip frames after a while)"}}},
+		{"skinnedRayUpdates", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 64.0}, {"description", "Skinned meshes (cars, people) whose ray tracing structure is refitted to their current pose per frame on the GPU, in turn (0 = skinned meshes are not ray traced)"}}},
 		{"indirectStrength", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 3.0}, {"description", "Factor on the bounced light"}}},
 		{"particles", {{"type", "boolean"}, {"description", "Particles (the game's particle systems and tyre smoke)"}}},
 		{"ssr", {{"type", "boolean"}, {"description", "Screen space reflections (on where the game's volumes have them on; needs temporal antialiasing)"}}},
 		{"tonemap", oneOf(kTonemaps, "Tone mapping curve")},
 		{"hostGrading", {{"type", "boolean"}, {"description", "The game's own tone mapping and colour grading (its tone curve, post exposure and shadows / midtones / highlights, as its volumes set them). Off: none of them; tonemap host is drawn with AgX"}}},
+		{"reflectionResolution", oneOf({"full", "half"}, "full: a ray traced reflection ray for every pixel (steady on fine shapes); half: one for each 2 x 2 block (a quarter of the cost)")},
 		{"reflectionDenoiser", oneOf(kReflectionDenoisers, "off, or nrd: the reflection rays sample each surface's GGX lobe (glossy reflections blur by roughness) and NVIDIA NRD (REBLUR_SPECULAR) denoises them; on by default. Needs DXR 1.1")},
 		{"skyMode", oneOf(kSkyModes, "Sky and sun: physical (Aether's atmosphere at timeOfDay) or scene (the scene's own sky texture and sun)")},
 		{"timeOfDay", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 24.0}, {"description", "Time of day in hours for the physical sky"}}},
@@ -150,6 +167,7 @@ json Settings::Schema() {
 		{"lodBias", {{"type", "number"}, {"minimum", 0.3}, {"maximum", 8.0}, {"description", "Unity's LOD bias: higher keeps detailed models up to a greater distance"}}},
 		{"anisotropicLevel", {{"type", "integer"}, {"minimum", 1}, {"maximum", 16}, {"description", "Anisotropic texture filtering level"}}},
 		{"vsync", {{"type", "integer"}, {"minimum", 0}, {"maximum", 2}, {"description", "Vertical sync: 0 off, 1 every refresh, 2 every second refresh"}}},
+		{"autoExposure", oneOf({"scene", "always"}, "scene: the exposure as the scene sets it (fixed or automatic). always: scenes with a fixed exposure are metered too, within 2.5 stops of their own value, adapting as eyes do")},
 		{"exposureEV", {{"type", "number"}, {"minimum", -10.0}, {"maximum", 10.0}, {"description", "Exposure bias in stops on top of the scene's exposure"}}},
 		{"vramBudgetMB", {{"type", "integer"}, {"minimum", 0}, {"maximum", 65536}, {"description", "Budget for Aether-owned GPU memory in MB (0 = none). Crossing it is reported; nothing is freed automatically"}}},
 		{"vramWarnPercent", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}, {"description", "Warning threshold in percent of the VRAM budget"}}},
@@ -197,6 +215,14 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 
 	if (key == "overlayHotkey") return wantInt(d.overlayHotkey, 8, 254);
 	if (key == "overlayVisibleAtStart") return wantBool(d.overlayVisibleAtStart);
+	if (key == "overlayHud") return wantBool(d.overlayHud);
+	if (key == "overlayTextScale") {
+		if (!value.is_number() || !(value.get<double>() >= 1.0 && value.get<double>() <= 1.6)) {
+			return "overlayTextScale must be a number between 1 and 1.6";
+		}
+		d.overlayTextScale = float(value.get<double>());
+		return {};
+	}
 	if (key == "overlayScale") {
 		if (!value.is_number()) {
 			return "overlayScale must be a number";
@@ -221,6 +247,8 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 	if (key == "pathTracing") return wantEnum(d.pathTracing, kPathTracingModes);
 	if (key == "pathTracingBounces") return wantInt(d.pathTracingBounces, 1, 12);
 	if (key == "pathTracingMaxSamples") return wantInt(d.pathTracingMaxSamples, 1, 100000);
+	if (key == "pathTracingDenoiser") return wantEnum(d.pathTracingDenoiser, kPathTracingDenoisers);
+	if (key == "pathTracingSamplesPerFrame") return wantInt(d.pathTracingSamplesPerFrame, 1, 4);
 	if (key == "quality") return wantEnum(d.quality, kQualities);
 	if (key == "testTriangle") return wantBool(d.testTriangle);
 	if (key == "gpuTiming") return wantBool(d.gpuTiming);
@@ -230,6 +258,7 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 	if (key == "sky") return wantBool(d.sky);
 	if (key == "ssao") return wantBool(d.ssao);
 	if (key == "antialiasing") return wantBool(d.antialiasing);
+	if (key == "upscaler") return wantEnum(d.upscaler, kUpscalers);
 	if (key == "bloom") return wantBool(d.bloom);
 	if (key == "motionBlur") return wantBool(d.motionBlur);
 	if (key == "ssr") return wantBool(d.ssr);
@@ -240,13 +269,14 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 	if (key == "probeGi") return wantBool(d.probeGi);
 	if (key == "lensFlare") return wantBool(d.lensFlare);
 	if (key == "rayTracedLighting") return wantBool(d.rayTracedLighting);
+	if (key == "lampShadows") return wantBool(d.lampShadows);
 	if (key == "rayTracedGi") return wantBool(d.rayTracedGi);
 	if (key == "radianceCascades") return wantBool(d.radianceCascades);
 	if (key == "followSceneNight") return wantBool(d.followSceneNight);
 	if (key == "rayTracedReflections") return wantBool(d.rayTracedReflections);
 	if (key == "skinnedRayUpdates") {
-		if (!value.is_number() || !(value.get<double>() >= 0.0 && value.get<double>() <= 4.0)) {
-			return "skinnedRayUpdates must be a number between 0 and 4";
+		if (!value.is_number() || !(value.get<double>() >= 0.0 && value.get<double>() <= 64.0)) {
+			return "skinnedRayUpdates must be a number between 0 and 64";
 		}
 		d.skinnedRayUpdates = float(value.get<double>());
 		return {};
@@ -274,6 +304,7 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 	}
 	if (key == "tonemap") return wantEnum(d.tonemap, kTonemaps);
 	if (key == "hostGrading") return wantBool(d.hostGrading);
+	if (key == "reflectionResolution") return wantEnum(d.reflectionResolution, {"full", "half"});
 	if (key == "reflectionDenoiser") return wantEnum(d.reflectionDenoiser, kReflectionDenoisers);
 	if (key == "skyMode") return wantEnum(d.skyMode, kSkyModes);
 	if (key == "cloudCoverage" || key == "cloudSpeed") {
@@ -292,6 +323,7 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 		(key == "timeOfDay" ? d.timeOfDay : d.sunHeading) = float(value.get<double>());
 		return {};
 	}
+	if (key == "autoExposure") return wantEnum(d.autoExposure, {"scene", "always"});
 	if (key == "exposureEV") {
 		if (!value.is_number() || !(value.get<double>() >= -10.0 && value.get<double>() <= 10.0)) {
 			return "exposureEV must be a number between -10 and 10";

@@ -50,6 +50,8 @@ Aether のレンダラーの構造（コマンドリストの単位、レンダ�
 
 フレームをまたぐ履歴（TAA の履歴、露出）は、2 枚の Imported テクスチャーを交互に使います（今のフレームが書く方と、前のフレームが書いた方）。
 
+解決（`TemporalAA` か `Dlss`）までのパスは描画サイズで、解決のあとのパスは出力サイズ（バックバッファーのサイズ）で描きます。TAA と DLAA では両者は同じです。DLSS 超解像では描画サイズが小さく、`Dlss` パスが出力サイズの履歴を書きます（[rendering-features.md](rendering-features.md) の「アンチエイリアスとアップスケーリング」）。履歴は出力サイズの `RGBA16F` で、DLSS が書けるよう UAV を持ちます。
+
 ### コンパイル
 
 1. 検証。次のどれかがあるとそのフレームは実行しません。理由はログ（`E_RENDER_GRAPH`、回数制限あり）と `get_render_graph` に出ます。
@@ -144,8 +146,10 @@ Transient はプールに戻ります。プールのテクスチャーは 120 �
 | `Reflections` | 画面空間反射か光線の反射が有効なとき（登録しない） | 映り込みを `SceneColor` に足す |
 | `Clouds` | 物理空で雲があるとき（登録しない） | カメラから見た雲を半分の解像度でマーチする |
 | `Sky` | 常に | 遠方面の全画面三角形で空を描く（物理空なら雲の層を重ねる） |
-| `PathTrace` | パストレーシングが動くとき（`pathTracing`、光線が使えるとき） | 1 画素 1 サンプルの経路を追い、平均（RGBA32F、2 枚を交互）に足す。`pathTracingMaxSamples` に達したら登録しない |
-| `PathTraceApply` | 同上 | 平均を、経路が答えた割合（a）で `SceneColor` に重ねる |
+| `PathTrace` | パストレーシングが動くとき（`pathTracing`、光線が使えるとき） | 平均のとき：1 画素 1 サンプルの経路を追い、平均（RGBA32F、2 枚を交互）に足す。`pathTracingMaxSamples` に達したら登録しない。DLSS Ray Reconstruction のとき（`pathTracingDenoiser = dlss_rr`）：毎フレーム `pathTracingSamplesPerFrame` 本の経路と RR のガイド（ノイズのある色、拡散 / 鏡面アルベド、法線と粗さ、鏡面の当たり距離）を 5 枚の Transient に書く（`PSPathTraceRr`） |
+| `PathTraceMotion` | RR のとき | RR の動きベクトルを `ScenePtMotion`（`R16G16_FLOAT`）に書く（`DlssMotion` と同じシェーダー） |
+| `PathTraceDenoise` | RR のとき | NVIDIA DLSS Ray Reconstruction（`Dlss::EvaluateRr`）。ガイド、`SceneDepth`、`ScenePtMotion` を `NON_PIXEL_SHADER_RESOURCE` で読み、RR の出力（`Scene.PathTraceDenoised`、`RGBA16F`、UAV、持続）を書く。失敗すると、そのフレームはラスタライズの絵、次からは平均 |
+| `PathTraceApply` | パストレーシングが動くとき | 平均を、経路が答えた割合（a）で `SceneColor` に重ねる。RR のときは RR の出力をそのまま書く |
 | `Decals` | ブロブシャドウがあり、パストレーシングが動いていないとき | 箱の中の不透明面を深度から求めて暗くする |
 | `Transparent` | ブレンドするものがあるとき | 透明物。加算マテリアルは加算ブレンド |
 | `VolumetricFog` | ボリュメトリックフォグが有効なとき（登録しない） | フォグが散乱する光を半分の解像度でマーチする |
@@ -154,7 +158,9 @@ Transient はプールに戻ります。プールのテクスチャーは 120 �
 | `SmokeApply` | 同上 | スモークを絵に重ねる |
 | `Particles` | パーティクルがあるとき | ゲームのパーティクル（スモークを半分の解像度で描いたときはそれを除く） |
 | `BvhDebug` | `debugView` が `bvh` で光線が使えるとき | 画素ごとにカメラから光線を飛ばし、当たった形を表示する |
-| `TemporalAA` | 設定 `antialiasing`（登録しない） | サブピクセルずらした今のフレームを履歴に混ぜる |
+| `TemporalAA` | 設定 `antialiasing` で、`upscaler` が `taa` か DLSS が使えないとき（登録しない） | サブピクセルずらした今のフレームを履歴に混ぜる |
+| `DlssMotion` | `antialiasing` で、`upscaler` が DLSS のモードで DLSS が使えるとき（登録しない） | DLSS の動きベクトル（前 − 今、uv 単位、ジッターなし）を `SceneDlssMotion`（`R16G16_FLOAT`、描画サイズ）に書く。空は深度と前フレームのカメラから |
+| `Dlss` | 同上 | NVIDIA DLSS（`Dlss.cpp`）。`SceneColor`、`SceneDepth`、`SceneDlssMotion` を `NON_PIXEL_SHADER_RESOURCE` で読み、履歴（出力サイズ、UAV）を `UNORDERED_ACCESS` で書く。モードかサイズが変わると機能を作り直す（初回とカメラが変わったときはリセット）。NGX は自分のヒープとルートシグネチャーを設定するが、以降のパスはどれも自分のものを設定し直す |
 | `MotionBlur` | モーションブラーが有効なとき（登録しない） | 画面上の動きに沿ったぼかし |
 | `BloomDown0`〜`BloomDown4` | ブルームかレンズフレアが有効で、64x64 以上のとき（登録しない） | 段階的な縮小 |
 | `BloomUp3`〜`BloomUp0` | 同上 | 小さい段から拡大して重ねる |
@@ -172,6 +178,7 @@ Transient はプールに戻ります。プールのテクスチャーは 120 �
 | `SceneDepth` | Transient | `R32_TYPELESS`（DSV `D32_FLOAT`、SRV `R32_FLOAT`）、reversed Z |
 | `SceneSurface` | Transient | `R16G16B16A16_UNORM` |
 | `SceneVelocity` | Transient | `R16G16B16A16_FLOAT` |
+| `SceneDlssMotion` | Transient（DLSS のとき） | `R16G16_FLOAT`、描画サイズ |
 | `Scene.ShadowAtlas` | Imported | `R32_TYPELESS`（`D32_FLOAT`）、カスケード 2x2 |
 | `Scene.History`（2 枚） | Imported | `R16G16B16A16_FLOAT` |
 | `Scene.Exposure`（2 枚） | Imported | `R16_FLOAT`、1x1 |
@@ -236,6 +243,6 @@ G-buffer は持ちません。不透明のパスが、ピクセルごとにラ�
 
 - パスの自動的な並べ替え、使われないパスの削除、非同期コンピュート、複数リストへの分割記録はありません。
 - 透明物はオブジェクト単位で並べます（ピクセル単位ではない）。
-- 影を落とすライトは太陽（夜は月）だけです。点光源・スポットライトに影はありません。
+- シャドウマップを持つライトは太陽（夜は月）だけです。点光源・スポットライトの影はレイトレース（`lampShadows`、DXR 1.1 が必要）で、面の直接光だけに付きます。
 - 最後のカスケードの外で影が切れます。
 - GPU カリングはありません（カリングは CPU）。

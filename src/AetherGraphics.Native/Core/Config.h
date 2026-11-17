@@ -11,6 +11,8 @@ struct SettingsData {
 	int overlayHotkey = 0x79;        // VK_F10
 	bool overlayVisibleAtStart = false;
 	float overlayScale = 1.0f;       // 0.5 .. 3
+	float overlayTextScale = 1.0f;   // 1 .. 1.6: the text only, on top of overlayScale
+	bool overlayHud = false;         // a small frame rate readout in the corner while the overlay is closed
 	// free camera (its hotkey switches it on and off; the game's camera is overridden while it is on)
 	int freeCameraHotkey = 0x7A;     // VK_F11
 	float freeCameraSpeed = 4.0f;    // 0.2 .. 100 m/s (Shift x5, Ctrl x0.2)
@@ -19,6 +21,8 @@ struct SettingsData {
 	std::string pathTracing = "freeCamera";
 	int pathTracingBounces = 4;      // 1 .. 12
 	int pathTracingMaxSamples = 4096; // 1 .. 100000 per pixel; the picture stays as it is after that
+	std::string pathTracingDenoiser = "dlss_rr"; // dlss_rr (NVIDIA DLSS Ray Reconstruction where available) | off (the running average)
+	int pathTracingSamplesPerFrame = 1; // 1 .. 4 paths per pixel each frame, averaged within the frame (with dlss_rr)
 	// renderer
 	std::string quality = "high";    // low | medium | high | ultra
 	bool testTriangle = true;        // Phase 1 PoC pass
@@ -30,6 +34,10 @@ struct SettingsData {
 	bool shadows = true;             // directional shadow cascades
 	bool ssao = true;                // screen space ambient occlusion
 	bool antialiasing = true;        // temporal antialiasing
+	// which temporal resolve runs while antialiasing is on: taa (Aether's own) | dlaa (NVIDIA DLSS at the full size) |
+	// dlss_quality | dlss_balanced | dlss_performance | dlss_ultra_performance (DLSS super resolution: the scene is drawn
+	// smaller and DLSS writes the full size). Without DLSS (not an NVIDIA RTX GPU, no nvngx_dlss.dll) it is TAA.
+	std::string upscaler = "taa";
 	bool bloom = true;               // bloom as the game's volumes set it
 	bool motionBlur = true;          // motion blur as the game's volumes set it
 	bool particles = true;           // the game's particle systems and tyre smoke
@@ -38,6 +46,7 @@ struct SettingsData {
 	bool followSceneNight = true;    // the physical sky turns to night when the game's scene does (its day / night switch)
 	bool radianceCascades = true;    // the indirect light everywhere from radiance cascades (needs the ray tracing geometry); off: the probe grid
 	bool rayTracedGi = false;        // the opaque surfaces' ambient light per pixel from long rays (with rayTracedLighting) instead of the cascades or the probes
+	bool lampShadows = true;         // lamps (and head lamps) that cast shadows are shadowed by rays (needs the ray tracing geometry)
 	bool rayTracedLighting = true;   // the sun's shadow and the ambient occlusion from rays (NRD SIGMA, REBLUR); off: shadow map and screen space occlusion
 	bool lensFlare = true;           // ghosts, a halo and rays from the sun and from bright lamps, as a camera's lens makes them
 	bool probeGi = true;             // indirect light from a grid of probes around the camera that trace rays (needs the ray tracing geometry; only when radianceCascades is off)
@@ -58,21 +67,24 @@ struct SettingsData {
 	float lensFlareStrength = 1.0f; // 0 .. 3: factor on the lens flare
 	float bloomStrength = 0.3f; // Bloom strength, as a factor on what the scene asks for
 	float indirectStrength = 1.0f; // 0 .. 3: factor on the bounced light
-	// 0 .. 4: skinned meshes whose pose is read back per frame for ray tracing (0: skinned things keep their first pose in
-	// reflections). 0 by default: read back every frame, Unity's frame fence falls further and further behind (measured:
-	// after about 45 s forty of Aether's 48 command lists wait for it and most frames are skipped: the picture flickers).
-	float skinnedRayUpdates = 0.0f;
+	// 0 .. 64: skinned meshes (cars, people) whose ray tracing structure is refitted to their current pose per frame, in
+	// turn, on the GPU from Unity's skinned vertex buffer (0: skinned meshes are not in the ray structures at all; their
+	// shadow comes from the untraced casters' shadow map). Their geometry is read back once only: reading the pose back
+	// every frame made Unity's frame fence fall behind and frames were skipped (the picture flickered).
+	float skinnedRayUpdates = 8.0f;
 	float moonlight = 0.5f;        // 0 .. 4: the moon's light at night, as a factor (1: a night one can see the yard in; 0.25: nearly black)
 	float fogStrength = 1.0f;      // 0 .. 20: factor on the fog density (physical sky: the air's own haze; else the scene's fog)
 	float smokeOpacity = 1.0f; // Tyre smoke opacity factor
 	float lodBias = 2.8f; // Unity's LOD bias: higher keeps detailed models up to a greater distance
-	int anisotropicLevel = 9; // Anisotropic texture filtering level
+	int anisotropicLevel = 8; // Anisotropic texture filtering level
 	int vsync = 1; // Vertical sync: 0 off, 1 every refresh, 2 every second refresh
 	std::string tonemap = "host";    // host (the curve of the game renderer) | agx | aces | neutral | none
 	// The game's own tone mapping and colour grading: its tone curve, its post exposure and its shadows / midtones /
 	// highlights grading, as its volumes set them. Off: none of them; tonemap "host" is drawn with AgX.
 	bool hostGrading = true;
+	std::string reflectionResolution = "full"; // full: a reflection ray for every pixel | half: one for each 2 x 2 block
 	std::string reflectionDenoiser = "nrd"; // nrd | off: the reflection rays sample each surface's GGX lobe and NVIDIA NRD (REBLUR) denoises them (off: mirror rays, not denoised)
+	std::string autoExposure = "always"; // scene: as the scene's exposure says | always: scenes with a fixed exposure are metered too (eye adaptation)
 	float exposureEV = 0.0f;         // exposure bias in stops on top of the scene's exposure
 	int vramBudgetMB = 2048;         // budget for Aether-owned GPU memory (0 = none): crossing it is reported, nothing is freed
 	int vramWarnPercent = 80;        // warning threshold in percent of the budget

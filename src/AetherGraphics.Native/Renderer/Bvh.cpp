@@ -7,6 +7,8 @@
 
 #include "../Core/Log.h"
 #include "../Resources/GpuResources.h"
+#include "../Scene/SceneStore.h"
+#include "../Shaders/ShaderManager.h"
 
 namespace aether {
 
@@ -264,6 +266,11 @@ void SceneBvh::Alias(AeHandle alias, AeHandle mesh) {
 	pendingAliases_.push_back({alias, mesh});
 }
 
+void SceneBvh::SetPoseLayout(AeHandle mesh, uint32_t positionOffset, uint32_t positionFormat) {
+	std::lock_guard lock(mutex_);
+	pendingPoseLayouts_.push_back({mesh, positionOffset, positionFormat});
+}
+
 void SceneBvh::Forget(AeHandle mesh) {
 	halves_.erase(mesh);
 	const bool wasChanging = changing_.erase(mesh) != 0;
@@ -271,6 +278,7 @@ void SceneBvh::Forget(AeHandle mesh) {
 	{
 		std::lock_guard lock(mutex_);
 		pendingForget_.push_back(mesh);
+		pendingPoseLayouts_.erase(std::remove_if(pendingPoseLayouts_.begin(), pendingPoseLayouts_.end(), [mesh](const PoseLayout& l) { return l.mesh == mesh; }), pendingPoseLayouts_.end());
 	}
 	if (wasChanging) {
 		Job job;
@@ -291,6 +299,7 @@ void SceneBvh::Clear() {
 	jobs_.clear();
 	built_.clear();
 	pendingAliases_.clear();
+	pendingPoseLayouts_.clear();
 	pendingForget_.clear();
 }
 
@@ -332,6 +341,10 @@ void SceneBvh::WorkerMain() {
 			ReadMesh(job, built, keep);
 			if (keep && built.tris.empty()) {
 				topologies_.erase(job.mesh);
+			} else if (keep) {
+				// (for a pose taken on the GPU: the render thread needs which vertices each triangle uses)
+				built.triVertices = keep->triVertices;
+				built.vertexCount = keep->vertexCount;
 			}
 		}
 		built.ms = NowMs() - start;
@@ -443,12 +456,15 @@ void SceneBvh::Compact() {
 void SceneBvh::BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT64 fence, uint64_t frame) {
 	std::vector<Built> built;
 	std::vector<std::pair<AeHandle, AeHandle>> aliases;
+	std::vector<PoseLayout> poseLayouts;
 	std::vector<AeHandle> forget;
 	uint64_t generation;
+	frame_ = frame;
 	{
 		std::lock_guard lock(mutex_);
 		built.swap(built_);
 		aliases.swap(pendingAliases_);
+		poseLayouts.swap(pendingPoseLayouts_);
 		forget.swap(pendingForget_);
 		generation = generation_.load();
 		if (!jobs_.empty() && !worker_.joinable() && !stop_) {
@@ -464,6 +480,10 @@ void SceneBvh::BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list,
 		dirtyRanges_.clear();
 		RetireResource(trisBuffer_, fence);
 		RetireAllStructures(fence);
+		for (auto& [mesh, pose] : poses_) {
+			RetirePose(pose, fence);
+		}
+		poses_.clear();
 		trisVa_ = 0;
 		uploadedTris_ = 0;
 		deadTris_ = 0;
@@ -476,6 +496,11 @@ void SceneBvh::BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list,
 	for (AeHandle h : forget) {
 		aliases_.erase(h);
 		RetireBlas(h, fence);
+		auto pose = poses_.find(h);
+		if (pose != poses_.end()) {
+			RetirePose(pose->second, fence);
+			poses_.erase(pose);
+		}
 		auto it = meshes_.find(h);
 		if (it != meshes_.end()) {
 			deadTris_ += it->second.triCount;
@@ -484,6 +509,13 @@ void SceneBvh::BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list,
 				a = a->second == h ? aliases_.erase(a) : std::next(a);
 			}
 		}
+	}
+	// (after what went: a layout still pending when its mesh was forgotten was dropped there)
+	for (const PoseLayout& l : poseLayouts) {
+		GpuPose& pose = poses_[l.mesh];
+		pose.layout = true;
+		pose.positionOffset = l.positionOffset;
+		pose.positionFormat = l.positionFormat;
 	}
 	for (Built& b : built) {
 		if (b.generation != generation) {
@@ -500,10 +532,20 @@ void SceneBvh::BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list,
 			dirtyRanges_.push_back({e.triBase, e.triCount});
 			stale_.insert(b.mesh);
 			refitMsLast_ = b.ms;
+			auto pose = poses_.find(b.mesh);
+			if (pose != poses_.end()) {
+				pose->second.poolStale = true; // (a pose read back: the next pass on the GPU writes its own over it again)
+			}
 			continue;
 		}
 		if (existing != meshes_.end()) {
 			continue;
+		}
+		auto pose = poses_.find(b.mesh);
+		if (pose != poses_.end() && b.changing && !b.triVertices.empty()) {
+			RetirePose(pose->second, fence);
+			pose->second.triVertices = std::move(b.triVertices);
+			pose->second.vertexCount = b.vertexCount;
 		}
 		MeshEntry e;
 		e.triBase = uint32_t(tris_.size());
@@ -523,7 +565,8 @@ void SceneBvh::BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list,
 	bool uploaded = false;
 	if (dirty_ && device && list && !tris_.empty() && (frame - lastUploadFrame_ > (quiet ? 20u : 180u) || !trisBuffer_)) {
 		const uint64_t bytes = uint64_t(tris_.size()) * sizeof(BvhTri);
-		ComPtr<ID3D12Resource> buffer = MakeBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, false);
+		// (writable by the pose pass: the triangles of skinned meshes whose pose is taken on the GPU are written there)
+		ComPtr<ID3D12Resource> buffer = MakeBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true);
 		ComPtr<ID3D12Resource> staging = MakeBuffer(device, bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
 		void* mapped = nullptr;
 		const D3D12_RANGE none = {0, 0};
@@ -549,6 +592,10 @@ void SceneBvh::BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list,
 			lastUploadFrame_ = frame;
 			++uploads_;
 			uploaded = true;
+			// (the copy has every GPU pose as it was read back: those meshes go first in the next pose pass)
+			for (auto& [mesh, pose] : poses_) {
+				pose.poolStale = true;
+			}
 		} else {
 			AE_LOG_CODE(Error, "Bvh", "E_BVH_UPLOAD", "The ray tracing triangles could not be uploaded: reflections fall back to probes");
 			dirty_ = false;
@@ -623,6 +670,15 @@ bool SceneBvh::AddInstance(AeHandle mesh, const Mat4& world, uint32_t skipSubMes
 			}
 		}
 	}
+	auto pose = poses_.find(it->first);
+	if (pose != poses_.end() && pose->second.layout) {
+		if (poseBudget_.load() == 0) {
+			return false; // (skinned meshes are off for rays: not traced in a pose that is not theirs)
+		}
+		// the instance's own mesh is the vertex buffer Unity skinned this frame into
+		pose->second.source = mesh;
+		pose->second.sourceFrame = frame_;
+	}
 	const Mat4 inv = Inverse(world);
 	TlasInstance instance = {};
 	for (int r = 0; r < 3; ++r) {
@@ -657,6 +713,9 @@ bool SceneBvh::EndInstances(ID3D12Device* device, ID3D12GraphicsCommandList* lis
 		if (a.cpu) {
 			memcpy(a.cpu, instances_.data(), instances_.size() * sizeof(TlasInstance));
 			instancesVa_ = a.gpu;
+			if (support_ != 0) {
+				RefitPoses(device, list, fence);
+			}
 			ok = BuildStructures(device, list, fence);
 		}
 	}
@@ -672,6 +731,8 @@ bool SceneBvh::EndInstances(ID3D12Device* device, ID3D12GraphicsCommandList* lis
 		{"updates", refits_.load()}, {"updateUploads", partialUploads_}, {"lastUpdateMs", refitMsLast_},
 		{"bottomLevel", blas_.size()}, {"bottomLevelBytes", blasBytes_}, {"bottomLevelBuilds", blasBuilds_}, {"bottomLevelUpdates", blasUpdates_},
 		{"topLevelBytes", tlas_ ? tlas_->GetDesc().Width : 0},
+		{"gpuPose", {{"meshes", poses_.size()}, {"budget", poseBudget_.load()}, {"candidates", poseCandidatesFrame_}, {"refitted", poseRefitsFrame_}, {"refitsTotal", poseRefitsTotal_},
+			{"skipped", poseSkipped_}, {"lastSkip", poseLastSkip_}, {"cpuMs", poseCpuMs_}, {"pipeline", posePipeline_ != nullptr}}},
 		{"frame", {{"instances", instances_.size()}, {"instanceTriangles", frameInstanceTris_}, {"traced", ok}, {"cpuMs", NowMs() - start}}},
 	};
 	return ok;
@@ -701,6 +762,228 @@ void SceneBvh::RetireAllStructures(UINT64 fence) {
 	tlasVa_ = 0;
 }
 
+void SceneBvh::RetirePose(GpuPose& pose, UINT64 fence) {
+	RetireResource(pose.triVertexBuffer, fence);
+	RetireResource(pose.positions, fence);
+	pose.posed = false;
+	pose.poolStale = true;
+}
+
+bool SceneBvh::EnsurePosePipeline(ID3D12Device* device, UINT64 fence) {
+	const uint64_t generation = ShaderManager::Get().Generation();
+	if (generation == poseShaderGeneration_ && (posePipeline_ || poseShaderFailed_)) {
+		return posePipeline_ != nullptr;
+	}
+	poseShaderGeneration_ = generation;
+	poseShaderFailed_ = true;
+	if (!poseRoot_) {
+		// b0: the constants, t0: the skinned vertex buffer, t1: the triangles' vertex indices, u0: the structure's
+		// vertices, u1: the pool (all root views: no descriptors)
+		D3D12_ROOT_PARAMETER params[5] = {};
+		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+		params[0].Constants = {0, 0, 5};
+		params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+		params[1].Descriptor = {0, 0};
+		params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+		params[2].Descriptor = {1, 0};
+		params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+		params[3].Descriptor = {0, 0};
+		params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+		params[4].Descriptor = {1, 0};
+		D3D12_ROOT_SIGNATURE_DESC rs = {UINT(_countof(params)), params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+		ComPtr<ID3DBlob> blob, error;
+		HRESULT hr = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+		if (SUCCEEDED(hr)) {
+			hr = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&poseRoot_));
+		}
+		if (FAILED(hr)) {
+			AE_LOG_CODE(Error, "Bvh", "E_BVH_POSE", "The skinned pose pass's root signature could not be created (%s): skinned meshes keep their first pose for rays", HrToString(hr).c_str());
+			return false;
+		}
+		poseRoot_->SetName(L"Aether.Bvh.PoseRoot");
+	}
+	ComPtr<ID3DBlob> cs = ShaderManager::Get().Compile("bvh_pose.hlsl", "CSPose", "cs_6_5");
+	ComPtr<ID3D12PipelineState> pso;
+	if (cs) {
+		D3D12_COMPUTE_PIPELINE_STATE_DESC d = {};
+		d.pRootSignature = poseRoot_.Get();
+		d.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+		if (FAILED(device->CreateComputePipelineState(&d, IID_PPV_ARGS(&pso)))) {
+			pso.Reset();
+		}
+	}
+	if (posePipeline_) {
+		ComPtr<IUnknown> old;
+		posePipeline_.As(&old);
+		GpuResources::Get().Retire(old, fence);
+		posePipeline_.Reset();
+	}
+	if (!pso) {
+		AE_LOG_CODE(Error, "Bvh", "E_BVH_POSE", "The skinned pose pass (bvh_pose.hlsl) could not be made: skinned meshes keep their first pose for rays");
+		return false;
+	}
+	pso->SetName(L"Aether.Bvh.Pose");
+	posePipeline_ = pso;
+	poseShaderFailed_ = false;
+	return true;
+}
+
+// Skinned meshes whose pose is taken on the GPU: for the ones instanced this frame (at most poseBudget_, in turn;
+// those whose part of the pool was uploaded anew over their pose first), the pose pass writes the triangles from the
+// vertex buffer Unity skinned into this frame, and their structures are marked for an update. Recorded after the
+// pool's uploads of the frame (BeginFrame) and before the structures are built.
+void SceneBvh::RefitPoses(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT64 fence) {
+	const double start = NowMs();
+	poseRefitsFrame_ = poseCandidatesFrame_ = poseSkipped_ = 0;
+	poseCpuMs_ = 0;
+	const uint32_t budget = poseBudget_.load();
+	if (poses_.empty() || budget == 0 || !trisBuffer_ || !device || !list) {
+		return;
+	}
+	struct Pick { AeHandle mesh; GpuPose* pose; uint32_t triBase, triCount; ID3D12Resource* vertices; uint32_t stride; bool first; };
+	std::vector<Pick> candidates;
+	for (auto& [handle, p] : poses_) {
+		if (!p.layout || p.sourceFrame != frame_ || p.triVertices.empty() || p.vertexCount == 0) {
+			continue;
+		}
+		const auto e = meshes_.find(handle);
+		if (e == meshes_.end() || uint64_t(e->second.triCount) * 3 != p.triVertices.size() || uint64_t(e->second.triBase) + e->second.triCount > uploadedTris_) {
+			continue;
+		}
+		// (the alias's stream 0 is Unity's skinned buffer. Read through a root view, which has no bounds: it must hold
+		// every vertex the triangles name, positions as three floats on a four byte boundary.)
+		const SceneMesh* sm = SceneStore::Get().Mesh(p.source);
+		const char* skip = nullptr;
+		uint32_t stride = 0;
+		if (!sm || !sm->vertexBuffer[0]) {
+			skip = "the instance's mesh has no vertex buffer";
+		} else {
+			stride = sm->desc.streamStride[0];
+			const D3D12_RESOURCE_DESC rd = sm->vertexBuffer[0]->GetDesc();
+			if (p.positionFormat != DXGI_FORMAT_R32G32B32_FLOAT && p.positionFormat != DXGI_FORMAT_R32G32B32A32_FLOAT) {
+				skip = "positions not in 32 bit floats";
+			} else if (stride == 0 || stride % 4 != 0 || p.positionOffset % 4 != 0 || p.positionOffset + 12 > stride) {
+				skip = "a vertex layout the pass cannot read";
+			} else if (rd.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || rd.Width < uint64_t(p.vertexCount) * stride) {
+				skip = "the skinned buffer holds fewer vertices than the pose read back";
+			} else if (e->second.triCount > 65535u * 64u) {
+				skip = "too many triangles for one dispatch";
+			}
+		}
+		if (skip) {
+			++poseSkipped_;
+			poseLastSkip_ = skip;
+			continue;
+		}
+		candidates.push_back({handle, &p, e->second.triBase, e->second.triCount, sm->vertexBuffer[0].Get(), stride, !p.posed || p.poolStale});
+	}
+	poseCandidatesFrame_ = uint32_t(candidates.size());
+	if (candidates.empty() || !EnsurePosePipeline(device, fence)) {
+		poseCpuMs_ = NowMs() - start;
+		return;
+	}
+	// first the ones whose pool part or structure is behind, then in turn after the last one refitted
+	std::sort(candidates.begin(), candidates.end(), [](const Pick& a, const Pick& b) { return a.mesh < b.mesh; });
+	std::vector<Pick> chosen;
+	for (const Pick& c : candidates) {
+		if (c.first && chosen.size() < budget) {
+			chosen.push_back(c);
+		}
+	}
+	const size_t n = candidates.size();
+	size_t from = 0;
+	while (from < n && candidates[from].mesh <= poseCursor_) {
+		++from;
+	}
+	for (size_t k = 0; k < n && chosen.size() < budget; ++k) {
+		const Pick& c = candidates[(from + k) % n];
+		if (!c.first) {
+			chosen.push_back(c);
+			poseCursor_ = c.mesh;
+		}
+	}
+	// the buffers of meshes seen for the first time: the triangles' vertex indices (uploaded once) and the structure's vertices
+	std::vector<D3D12_RESOURCE_BARRIER> before, after;
+	auto transition = [](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+		D3D12_RESOURCE_BARRIER b = {};
+		b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		b.Transition.pResource = r;
+		b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		b.Transition.StateBefore = from;
+		b.Transition.StateAfter = to;
+		return b;
+	};
+	std::vector<Pick> ready;
+	for (const Pick& c : chosen) {
+		GpuPose& p = *c.pose;
+		if (!p.triVertexBuffer) {
+			const uint64_t bytes = uint64_t(p.triVertices.size()) * sizeof(uint32_t);
+			ComPtr<ID3D12Resource> buffer = MakeBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, false);
+			ComPtr<ID3D12Resource> staging = MakeBuffer(device, bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
+			void* mapped = nullptr;
+			const D3D12_RANGE none = {0, 0};
+			if (!buffer || !staging || FAILED(staging->Map(0, &none, &mapped))) {
+				AE_LOG_CODE(Error, "Bvh", "E_BVH_POSE", "A skinned mesh's buffers for the pose pass could not be created");
+				continue;
+			}
+			memcpy(mapped, p.triVertices.data(), size_t(bytes));
+			staging->Unmap(0, nullptr);
+			list->CopyBufferRegion(buffer.Get(), 0, staging.Get(), 0, bytes);
+			before.push_back(transition(buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+			buffer->SetName(L"Aether.Bvh.PoseTriVertices");
+			RetireResource(staging, fence);
+			p.triVertexBuffer = buffer;
+		}
+		bool fresh = false;
+		if (!p.positions) {
+			p.positions = MakeBuffer(device, uint64_t(c.triCount) * 36, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true);
+			if (!p.positions) {
+				AE_LOG_CODE(Error, "Bvh", "E_BVH_POSE", "A skinned mesh's buffers for the pose pass could not be created");
+				continue;
+			}
+			p.positions->SetName(L"Aether.Bvh.PosePositions");
+			p.posed = false;
+			fresh = true;
+		}
+		// (kept for the structure's builds in NON_PIXEL_SHADER_RESOURCE; new: COMMON)
+		before.push_back(transition(p.positions.Get(), fresh ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+		after.push_back(transition(p.positions.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+		ready.push_back(c);
+	}
+	if (ready.empty()) {
+		if (!before.empty()) {
+			list->ResourceBarrier(UINT(before.size()), before.data()); // (index buffers uploaded for meshes whose other buffer failed)
+		}
+		poseCpuMs_ = NowMs() - start;
+		return;
+	}
+	before.push_back(transition(trisBuffer_.Get(), kShaderRead, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	after.push_back(transition(trisBuffer_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderRead));
+	list->ResourceBarrier(UINT(before.size()), before.data());
+	// (Unity's skinned buffer is read as it is, not transitioned: its skinning ran earlier on the same queue, and the
+	// raster path draws from it the same way)
+	list->SetComputeRootSignature(poseRoot_.Get());
+	list->SetPipelineState(posePipeline_.Get());
+	for (const Pick& c : ready) {
+		GpuPose& p = *c.pose;
+		const uint32_t constants[5] = {c.triCount, c.stride, p.positionOffset, c.triBase, p.vertexCount};
+		list->SetComputeRoot32BitConstants(0, 5, constants, 0);
+		list->SetComputeRootShaderResourceView(1, c.vertices->GetGPUVirtualAddress());
+		list->SetComputeRootShaderResourceView(2, p.triVertexBuffer->GetGPUVirtualAddress());
+		list->SetComputeRootUnorderedAccessView(3, p.positions->GetGPUVirtualAddress());
+		list->SetComputeRootUnorderedAccessView(4, trisBuffer_->GetGPUVirtualAddress());
+		list->Dispatch((c.triCount + 63) / 64, 1, 1);
+		p.posed = true;
+		p.poolStale = false;
+		p.refitFrame = frame_;
+		stale_.insert(c.mesh); // (its structure: updated from the new vertices in BuildStructures)
+		++poseRefitsFrame_;
+		++poseRefitsTotal_;
+	}
+	list->ResourceBarrier(UINT(after.size()), after.data());
+	poseCpuMs_ = NowMs() - start;
+}
+
 bool SceneBvh::BuildStructures(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT64 fence) {
 	if (support_ < 0) {
 		support_ = Supported(device) ? 1 : 0;
@@ -725,7 +1008,10 @@ bool SceneBvh::BuildStructures(ID3D12Device* device, ID3D12GraphicsCommandList* 
 		}
 		Blas& b = blas_[mesh];
 		const bool stale = stale_.count(mesh) != 0;
-		const bool update = stale && b.buffer && b.updatable && b.triCount == e->second.triCount;
+		// (a pose taken on the GPU: built from the buffer the pose pass wrote; the first time from it, a full build)
+		const auto pose = poses_.find(mesh);
+		const D3D12_GPU_VIRTUAL_ADDRESS poseVa = pose != poses_.end() && pose->second.posed && pose->second.positions ? pose->second.positions->GetGPUVirtualAddress() : 0;
+		const bool update = stale && b.buffer && b.updatable && b.triCount == e->second.triCount && b.vertexVa == poseVa;
 		if ((b.buffer && b.triCount == e->second.triCount && !stale) || (!update && budget < e->second.triCount && built > 0)) {
 			continue;
 		}
@@ -734,27 +1020,30 @@ bool SceneBvh::BuildStructures(ID3D12Device* device, ID3D12GraphicsCommandList* 
 		}
 		const uint32_t count = e->second.triCount;
 		// the vertices, three per triangle, as the pool has them (the corner and its two edges)
-		ComPtr<ID3D12Resource> vertices = MakeBuffer(device, uint64_t(count) * 36, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
-		float* v = nullptr;
-		const D3D12_RANGE none = {0, 0};
-		if (!vertices || FAILED(vertices->Map(0, &none, reinterpret_cast<void**>(&v)))) {
-			break;
-		}
-		for (uint32_t i = 0; i < count; ++i) {
-			const BvhTri& t = tris_[e->second.triBase + i];
-			for (int k = 0; k < 3; ++k) {
-				v[i * 9 + k] = t.v0[k];
-				v[i * 9 + 3 + k] = t.v0[k] + t.e1[k];
-				v[i * 9 + 6 + k] = t.v0[k] + t.e2[k];
+		ComPtr<ID3D12Resource> vertices;
+		if (!poseVa) {
+			vertices = MakeBuffer(device, uint64_t(count) * 36, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
+			float* v = nullptr;
+			const D3D12_RANGE none = {0, 0};
+			if (!vertices || FAILED(vertices->Map(0, &none, reinterpret_cast<void**>(&v)))) {
+				break;
 			}
+			for (uint32_t i = 0; i < count; ++i) {
+				const BvhTri& t = tris_[e->second.triBase + i];
+				for (int k = 0; k < 3; ++k) {
+					v[i * 9 + k] = t.v0[k];
+					v[i * 9 + 3 + k] = t.v0[k] + t.e1[k];
+					v[i * 9 + 6 + k] = t.v0[k] + t.e2[k];
+				}
+			}
+			vertices->Unmap(0, nullptr);
 		}
-		vertices->Unmap(0, nullptr);
 		D3D12_RAYTRACING_GEOMETRY_DESC geometry = {};
 		geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
 		geometry.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE; // (opaque or not is the instance's: FORCE_OPAQUE / FORCE_NON_OPAQUE)
 		geometry.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 		geometry.Triangles.VertexCount = count * 3;
-		geometry.Triangles.VertexBuffer = {vertices->GetGPUVirtualAddress(), 12};
+		geometry.Triangles.VertexBuffer = {poseVa ? poseVa : vertices->GetGPUVirtualAddress(), 12};
 		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
 		inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
 		// (a changing mesh: built fast and to be updated; the rest: built once, for the fastest rays)
@@ -801,6 +1090,7 @@ bool SceneBvh::BuildStructures(ID3D12Device* device, ID3D12GraphicsCommandList* 
 				RetireResource(scratch, fence);
 			}
 			b.triCount = count;
+			b.vertexVa = poseVa;
 			blasBytes_ += result->GetDesc().Width;
 			++blasBuilds_;
 		}
@@ -908,6 +1198,24 @@ void SceneBvh::Release(bool leak) {
 			b.buffer.Detach();
 			b.scratch.Detach();
 		}
+	}
+	if (leak) {
+		poseRoot_.Detach();
+		posePipeline_.Detach();
+		for (auto& [mesh, pose] : poses_) {
+			pose.triVertexBuffer.Detach();
+			pose.positions.Detach();
+		}
+	}
+	poseRoot_.Reset();
+	posePipeline_.Reset();
+	poseShaderFailed_ = false;
+	for (auto& [mesh, pose] : poses_) {
+		// (what was read stays: the buffers are made again on the next device)
+		pose.triVertexBuffer.Reset();
+		pose.positions.Reset();
+		pose.posed = false;
+		pose.poolStale = true;
 	}
 	trisBuffer_.Reset();
 	tlas_.Reset();

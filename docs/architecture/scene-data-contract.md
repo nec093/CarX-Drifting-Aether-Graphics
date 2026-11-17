@@ -85,6 +85,7 @@
 | `Aether_SceneMeshIndices(mesh, data, bytes, indexStride, subMeshes, subMeshCount)` | インデックスとサブメッシュ |
 | `Aether_SceneMeshChanging(mesh)` | 頂点が変わるメッシュ（スキンメッシュ）。形状を送る前に呼ぶ。その後に送った頂点は木の当てはめ直しになる |
 | `Aether_SceneMeshAlias(alias, mesh)` | `alias` のインスタンスを `mesh` の木でたどる（スキンメッシュの交互に使われるバッファーが 1 つの木を共有する） |
+| `Aether_SceneMeshGpuPose(mesh, positionOffset, positionFormat)` | 頂点が変わるメッシュの姿勢を GPU で取る（`Aether_SceneMeshChanging` と一緒に、形状を 1 回送る前に呼ぶ）。毎フレーム、インスタンスが使う `alias` のストリーム 0 の `positionOffset` から位置（`DXGI_FORMAT_R32G32B32_FLOAT` か `R32G32B32A32_FLOAT`）を読む。読み戻しは要らない |
 | `Aether_SceneMeshForget(mesh)` | シーンのメッシュでないハンドル（上の木のハンドル）の木を消す |
 | `Aether_SceneBvhReset()` | すべての木を消す。現在のマネージド側は呼ばない |
 

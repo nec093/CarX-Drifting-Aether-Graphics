@@ -44,8 +44,9 @@ public:
 	// (towards the sun or the moon, as the last frame had it; read without a lock: a torn read is three old or new floats)
 	Vec3 SunDirection() const { return sunDirection_; }
 	// the path traced picture (setting pathTracing): running, and the samples per pixel averaged so far
-	struct PathTraceStatus { bool active = false; uint32_t samples = 0; };
-	PathTraceStatus PathTracing() const { return {ptActiveShown_.load(), ptSamplesShown_.load()}; }
+	// (denoised: by DLSS Ray Reconstruction, a fresh sample every frame; samples then counts the frames since its last reset)
+	struct PathTraceStatus { bool active = false; uint32_t samples = 0; bool denoised = false; };
+	PathTraceStatus PathTracing() const { return {ptActiveShown_.load(), ptSamplesShown_.load(), ptRrShown_.load()}; }
 	json GraphDescription() { return graph_.Describe(); }
 
 private:
@@ -72,9 +73,11 @@ private:
 	void UploadDefaults(ID3D12GraphicsCommandList* list);
 	ID3D12PipelineState* Pipeline(uint32_t layoutId, PassKind kind, uint32_t cull);
 	// full screen passes: one pixel shader each (scene_post.hlsl), named in kFullscreenEntry (SceneRenderer.cpp)
-	enum FullscreenKind { kFullscreenSky = 0, kFullscreenComposite, kFullscreenAo, kFullscreenAoBlur, kFullscreenExposure, kFullscreenIrradiance, kFullscreenTaa, kFullscreenMotionBlur, kFullscreenBloomDown, kFullscreenBloomUp, kFullscreenSsr, kFullscreenTransmittanceLut, kFullscreenMultiScatterLut, kFullscreenSkyView, kFullscreenCloudNoise, kFullscreenSkyClouds, kFullscreenClouds, kFullscreenFog, kFullscreenFogApply, kFullscreenReflectionBlur, kFullscreenBvhDebug, kFullscreenRayTrace, kFullscreenGiRays, kFullscreenGiIrradiance, kFullscreenGiDepth, kFullscreenLensFlare, kFullscreenSmokeApply, kFullscreenSunRays, kFullscreenAoRays, kFullscreenRcTrace, kFullscreenRcIrradiance, kFullscreenRcDepth, kFullscreenPathTrace, kFullscreenPathTraceApply, kFullscreenKindCount };
+	enum FullscreenKind { kFullscreenSky = 0, kFullscreenComposite, kFullscreenAo, kFullscreenAoBlur, kFullscreenExposure, kFullscreenIrradiance, kFullscreenTaa, kFullscreenMotionBlur, kFullscreenBloomDown, kFullscreenBloomUp, kFullscreenSsr, kFullscreenTransmittanceLut, kFullscreenMultiScatterLut, kFullscreenSkyView, kFullscreenCloudNoise, kFullscreenSkyClouds, kFullscreenClouds, kFullscreenFog, kFullscreenFogApply, kFullscreenReflectionBlur, kFullscreenBvhDebug, kFullscreenRayTrace, kFullscreenGiRays, kFullscreenGiIrradiance, kFullscreenGiDepth, kFullscreenLensFlare, kFullscreenSmokeApply, kFullscreenSunRays, kFullscreenAoRays, kFullscreenRcTrace, kFullscreenRcIrradiance, kFullscreenRcDepth, kFullscreenPathTrace, kFullscreenPathTraceApply, kFullscreenDlssMotion, kFullscreenPathTraceRr, kFullscreenKindCount };
 	// draws a full screen pass into `output` (its whole size) with up to three inputs; `params` reach the shader as g_PassParams
 	bool Fullscreen(RenderGraph::PassContext& ctx, FullscreenKind kind, GpuTexture* output, GpuTexture* in0, GpuTexture* in1 = nullptr, GpuTexture* in2 = nullptr, const float* params = nullptr, GpuTexture* in3 = nullptr);
+	// The same with several render targets (the pipeline is made for their formats, in order; no blending).
+	bool FullscreenTargets(RenderGraph::PassContext& ctx, FullscreenKind kind, GpuTexture* const* outputs, uint32_t outputCount, GpuTexture* in0, GpuTexture* in1, GpuTexture* in2, const float* params);
 	uint32_t postNext_ = 0; // the next free table of this frame's post tables
 	std::shared_ptr<GpuTexture> irradiance_; // the sky's diffuse light per direction (octahedral map)
 	// temporal antialiasing: the resolved picture of the frame before, and the camera it was drawn with
@@ -86,9 +89,21 @@ private:
 	// reconstruct positions with
 	Mat4 nrdView_ = Mat4::Identity(), nrdProj_ = Mat4::Identity(), nrdViewPrev_ = Mat4::Identity(), nrdProjPrev_ = Mat4::Identity(), invViewProj_ = Mat4::Identity();
 	bool rtGi_ = false;      // this frame: the ambient light per pixel from long rays (setting rayTracedGi; the probe grid stops)
+	bool lampShadows_ = false; // this frame: lamps that cast shadows are shadowed by rays (setting lampShadows)
 	bool rtLighting_ = false; // this frame: the sun's shadow and the ambient occlusion from rays (setting rayTracedLighting, LightingDenoiser)
 	bool nrdFrame_ = false; // this frame: the reflection rays sample the surface's lobe and NRD denoises them (setting reflectionDenoiser = nrd)
-	bool taa_ = false;
+	bool taa_ = false; // this frame has a temporal resolve: Aether's TAA, or DLSS (dlssMode_)
+	// The temporal resolve by DLSS (setting upscaler; Dlss.h): DLAA at the full size, or super resolution, where
+	// everything up to the resolve is drawn at the render size and DLSS writes the output size (the target's). Without
+	// DLSS the render size is the output size. dlssBroken_: an evaluation failed for that setting: TAA until it changes.
+	int dlssMode_ = -1; // Dlss::Mode
+	uint32_t renderWidth_ = 0, renderHeight_ = 0;
+	float dlssJitter_[2] = {0, 0}; // this frame's projection offset in render pixels (x right, y down)
+	float mipBias_ = 0.0f;
+	bool dlssBroken_ = false;
+	int resolveByDlss_ = -1; // the frame before's resolve: 1 DLSS, 0 TAA, -1 none
+	std::string dlssBrokenFor_, upscalerNote_;
+	std::chrono::steady_clock::time_point dlssClock_ = std::chrono::steady_clock::now();
 	float bloomMix_ = 0, bloomScatter_ = 0, motionBlur_ = 0;
 	bool ownExposure_ = false;
 	bool ssr_ = false; // screen space reflections this frame (the host has them on, and Aether's switch)
@@ -152,6 +167,18 @@ private:
 	float ptKey_[40] = {};
 	std::atomic<bool> ptActiveShown_{false};
 	std::atomic<uint32_t> ptSamplesShown_{0};
+	// the path tracer's denoiser (setting pathTracingDenoiser: dlss_rr): NVIDIA DLSS Ray Reconstruction takes a fresh
+	// sample per pixel and its guides every frame instead of the running average. ptRr_: this frame's; ptRrOut_: its
+	// output (a UAV); ptRrBroken_: an evaluation failed: the running average until the setting changes. Its history is
+	// reset on a camera cut, a settings change or a size change, not when the camera moves.
+	bool ptRr_ = false, ptRrBroken_ = false, ptRrReset_ = true, ptRrFailed_ = false;
+	uint64_t ptRrBrokenRevision_ = 0;
+	std::shared_ptr<GpuTexture> ptRrOut_;
+	uint32_t ptRrCamera_ = 0, ptRrWidth_ = 0, ptRrHeight_ = 0;
+	uint64_t ptRrRevision_ = 0;
+	float ptRrPosition_[3] = {0, 0, 0};
+	std::string ptDenoiserNote_;
+	std::atomic<bool> ptRrShown_{false};
 	float rcCamera_[3] = {0, 0, 0};
 	bool lensFlare_ = false;
 	float lensFlareStrength_ = 0.0f;
@@ -208,8 +235,9 @@ private:
 	std::shared_ptr<GpuTexture> white_, flatNormal_, black_;
 	bool defaultsUploaded_ = false;
 	std::shared_ptr<GpuTexture> shadowAtlas_;
-	// with ray traced shadows: what the rays cannot find (meshes not in the ray structures: skinned people by default)
-	// casts its shadow from a shadow map of its own, half the atlas's size, the same cascades
+	// with ray traced shadows: what the rays cannot find (meshes not in the ray structures: skinned meshes with
+	// skinnedRayUpdates = 0, meshes whose triangles have not arrived yet) casts its shadow from a shadow map of its own,
+	// half the atlas's size, the same cascades
 	std::shared_ptr<GpuTexture> untracedAtlas_;
 	bool untracedShadow_ = false;
 	uint32_t rayMaterialPadded_ = 0; // this frame: ray instances whose mesh has more sub meshes than the renderer has materials

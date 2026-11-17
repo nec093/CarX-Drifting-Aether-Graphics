@@ -17,17 +17,22 @@ public:
 	static Overlay& Get();
 
 	// ---- any thread
-	bool Visible() const { return visible_.load(); }
+	// two windows: the settings (the hotkey) and the debug tools (Shift + the hotkey); Visible = either is open
+	bool Visible() const { return visible_.load() || debug_.load(); }
+	bool SettingsVisible() const { return visible_.load(); }
+	bool DebugVisible() const { return debug_.load(); }
 	void SetVisible(bool visible);
+	void SetDebugVisible(bool visible);
 	void Toggle() { SetVisible(!visible_.load()); }
-	bool WantsFrame() const;  // visible, or an approval prompt is waiting
+	void ToggleDebug() { SetDebugVisible(!debug_.load()); }
+	bool WantsFrame() const;  // a window is open, the frame rate readout is on, or an approval prompt is waiting
 	bool WantsInput() const { return WantsFrame() && (wantsMouse_.load() || wantsKeyboard_.load()); }
 	// bit 0: the overlay uses the mouse, bit 1: the keyboard (the free camera takes both while its input is live)
 	int InputFlags() const;
 	// ---- free camera (the game window's procedure switches it with its hotkey and gathers its input)
 	bool FreeCamera() const { return freeCamera_.load(); }
 	// the free camera has the mouse and keyboard: on, and the overlay closed
-	bool FreeCameraLive() const { return freeCamera_.load() && !visible_.load(); }
+	bool FreeCameraLive() const { return freeCamera_.load() && !Visible(); }
 	// Main thread (managed, once a frame): the input gathered since the last call. Returns bit 0 on, bit 1 live, bits
 	// 8.. the keys held (FreeCameraKey). out: mouse x, mouse y (counts), wheel (notches), speed, sensitivity.
 	// `fovDegrees`: the camera's field of view, for the display.
@@ -62,6 +67,8 @@ private:
 	static const int kFramesInFlight = 8;
 	static const UINT kSrvCount = 64;
 	std::atomic<bool> visible_{false};
+	std::atomic<bool> debug_{false};
+	std::atomic<bool> hud_{false}; // (the setting, read on the render thread)
 	std::atomic<bool> wantsMouse_{false}, wantsKeyboard_{false};
 	std::atomic<int> hotkey_{0x79};
 	std::atomic<int> freeCameraHotkey_{0x7A};
@@ -89,7 +96,8 @@ private:
 	UINT64 slotFence_[kFramesInFlight] = {};
 	uint64_t draws_ = 0; // overlay draws since the backends started (the DX12 backend's frame index)
 	bool drawPending_ = false;
-	float appliedScale_ = 0;
+	float appliedScale_ = 0, appliedTextScale_ = 0;
+	bool fontsLoaded_ = false;
 
 	HWND hooked_ = nullptr;
 	WNDPROC previousProc_ = nullptr;

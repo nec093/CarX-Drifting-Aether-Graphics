@@ -62,6 +62,7 @@ namespace AetherGraphics {
 		[DllImport(Dll)] public static extern unsafe int Aether_SmokeStep(void* puffs, int count, void* wheels, int wheelCount, void* bodies, int bodyCount, float dt, float time, UnityEngine.Vector3* wind, float opacity, AeParticle* quads);
 		[DllImport(Dll)] public static extern void Aether_SceneMeshChanging(uint mesh);
 		[DllImport(Dll)] public static extern void Aether_SceneMeshAlias(uint alias, uint mesh);
+		[DllImport(Dll)] public static extern void Aether_SceneMeshGpuPose(uint mesh, uint positionOffset, uint positionFormat);
 		[DllImport(Dll)] public static extern void Aether_SceneMeshForget(uint mesh);
 		[DllImport(Dll)] public static extern unsafe int Aether_SceneSetProbes(AeProbe* probes, uint count, uint structSize);
 		[DllImport(Dll)] public static extern unsafe int Aether_SceneSubmitParticles(AeParticleBatch* batches, uint batchCount, AeParticle* particles, uint particleCount, uint particleSize);
