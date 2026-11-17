@@ -176,6 +176,15 @@ Aether が描く絵の各要素と、その設定です。パスの順序やバ�
   - RR の状態：`get_status` の `dlss.rr`（`available`、`reason`、`created`、`renderSize`、`lastResult`、`lastResultOk`、`lastReset`、`featuresCreated`、`evaluations`）と `sceneRenderer.pathTracing`（`active`、`denoiserSetting`、`denoiser`（`dlss_rr` / `average` / `none`）、`samples`（RR ではリセットからのフレーム数）、`samplesPerFrame`、`rrAvailable`、`note`）、`get_render_graph` の `PathTraceDenoise` パスの注記（サイズ、ジッター、リセット）。ログ：使えるとき `DLSS Ray Reconstruction is available`、使えないとき `W_DLSS_RR_UNAVAILABLE`、作成 `DLSS Ray Reconstruction feature made`、失敗 `W_DLSS_RR_CREATE` / `W_DLSS_RR_EVALUATE`。
   - 計測（RTX 4070 Ti、3840 × 2054、ガレージ、4 バウンス）：`PathTrace` 約 8.8 ms / サンプル、`PathTraceApply` 0.3 ms。約 30 秒で 1200 サンプル。
 
+## 自動 LOD
+
+- **自動 LOD**（`autoLod`、既定オン。F10 の Quality →「Image」の「Automatic level of detail」）：遠くの静的メッシュを、三角形を減らした版で描く（`Renderer/MeshLod.cpp`）。
+- 作り方：光線の構造のために一度だけ読み戻す静的メッシュの形状（`SceneBvh`、頂点が変わるスキンメッシュは対象外）を、優先度の低いワーカーで meshoptimizer の `meshopt_simplify` にかける。サブメッシュごとに、三角形の約 50 %、25 %、10 % を目標に 3 段（誤差の上限はメッシュの外接半径の 1 %、3 %、8 %）。外周は固定（`LockBorder`）なので、サブメッシュ同士やタイル状のメッシュの継ぎ目は割れない。同じ位置の頂点の継ぎ目（UV や法線の境）も保たれる。三角形が 600 未満のメッシュ、一段目で 75 % を切れないメッシュには作らない。32 未満のサブメッシュはそのまま各段に写す。
+- 索引は元の頂点バッファを指す（サブメッシュの base vertex からの相対、元と同じ 16 / 32 ビット形式）ので、元の頂点バッファのまま、索引バッファだけ差し替えて描く。索引は 8 MB の GPU ページ（既定ヒープ）に詰め、1 フレームに 8 MB まで転送する（描画スレッドはワーカーを待たない）。メッシュの破棄とシーンの切り替えで解放する。
+- 選び方：インスタンスごとに、外接球のカメラに一番近い点から見て、その段の誤差（メッシュ単位 × インスタンスの拡大率）が **2 / `lodBias` 画素**（既定 2.8 で約 0.7 画素、描画解像度の高さで計算）以下に収まる、一番粗い段。カメラが外接球の中にいるときは元のまま。シャドウカスケードでは、その段から、誤差がカスケードのテクセルの半分以下に収まるところまで粗くする。インスタンス化の束は段ごとに分かれる。頂点カラーでレイヤーを混ぜる LayeredLit のサブメッシュは、画面では常に元のまま（簡略化は位置しか見ないので、頂点カラーの塗り分けが崩れるため）。
+- 光線の構造（BLAS）は元の三角形のまま（LOD なし）。
+- 統計：`get_status` の `sceneRenderer.autoLod`（`get_scene_info` では `aetherRenderer.autoLod`。`cameraView` に段ごとのインスタンス数と三角形数、元の三角形数、`meshes` に LOD のあるメッシュ数、段ごとの三角形数、`gpuPageBytes` / `gpuIndexBytes`、未処理の数）、`get_render_graph` の `Opaque` パスの注記。
+
 ## その他の設定
 
 - `lodBias`、`anisotropicLevel`、`vsync`：Unity の品質設定を Aether の値で上書きする。ゲーム側が毎フレーム書き戻すので、Aether も毎フレーム適用する。

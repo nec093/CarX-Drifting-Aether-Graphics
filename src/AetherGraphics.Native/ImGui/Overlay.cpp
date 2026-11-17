@@ -1166,8 +1166,10 @@ void QualityPage(const SettingsData& s) {
 		ChoiceRow("Anti-aliasing and upscaling", help, "upscaler", s.upscaler, upscalers, upscalerText, 6);
 		ImGui::EndDisabled();
 	}
+	SwitchRow("Natural tiling", "Ground, roads and slopes: no visible repeat pattern (hex tiling, a slow variation of brightness). Large static surfaces only.", "naturalTiling", s.naturalTiling);
 	IntSliderRow("Texture filtering", "Anisotropic filtering level: sharper textures at a glancing angle.", "anisotropicLevel", s.anisotropicLevel, 1, 16, "%dx");
 	SliderRow("Level of detail", "Higher keeps detailed models up to a greater distance.", "lodBias", s.lodBias, 0.3f, 8.0f, "%.1f");
+	SwitchRow("Automatic level of detail", "Distant static models are drawn with fewer triangles (simplified when they load). The level of detail above sets how far.", "autoLod", s.autoLod);
 	Label("Vertical sync", nullptr);
 	static const char* vsyncText[] = {"Off", "Every refresh", "Every second refresh"};
 	int vsync = std::min(std::max(s.vsync, 0), 2);
@@ -1184,6 +1186,7 @@ void LightingPage(const SettingsData& s) {
 	SliderRow("Softness", "How far the shadow edges are blurred, in shadow map texels (0 is hard).", "shadowSoftness", s.shadowSoftness, 0.0f, 4.0f, "%.1f");
 	ImGui::EndDisabled();
 	SwitchRow("Lamp shadows", "Street lamps and head lamps cast shadows, traced by rays (up to four lamps per pixel).", "lampShadows", s.lampShadows);
+	SwitchRow("Shadow caching", "Far shadows are redrawn every 2nd or 4th frame and kept in between (lighter; a far car's shadow may lag slightly).", "shadowCaching", s.shadowCaching);
 	SwitchRow("Ray traced shadows and occlusion", "The sun's shadow and the ambient occlusion from rays, denoised by NVIDIA NRD. Off: shadow map and screen space occlusion.", "rayTracedLighting", s.rayTracedLighting);
 	CardEnd();
 

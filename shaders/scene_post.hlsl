@@ -102,13 +102,19 @@ float4 PSTaa(FullscreenOutput input) : SV_Target {
 	float3 m1 = 0.0, m2 = 0.0;
 	float closest = 0.0;
 	int2 closestAt = p;
+	// The colours are compressed (c / (k + luma)) before they are compared and blended, so that a single very bright
+	// pixel does not blow the statistics up; k is the neighbourhood's mean luma, which makes it the same whatever units
+	// the scene is lit in. (k was 1: on a map lit in physical units, a 100 000 lux sun, every sunlit pixel's luma was
+	// in the thousands, all came out at 0.999, and inverted the picture was one flat colour per hue: a road without its
+	// cracks, foliage as flat blobs, bands in the sky.)
+	float3 around[9];
+	float k = 0.0;
 	for (int y = -1; y <= 1; ++y) {
 		for (int x = -1; x <= 1; ++x) {
 			int2 q = clamp(p + int2(x, y), int2(0, 0), last);
 			float3 c = SafeColor(g_SceneColor.Load(int3(q, 0)).rgb);
-			c *= 1.0 / (1.0 + Luma(c)); // (compressed: a single very bright pixel does not blow the statistics up)
-			m1 += c;
-			m2 += c * c;
+			around[(y + 1) * 3 + x + 1] = c;
+			k += Luma(c);
 			float d = g_PostDepth.Load(int3(q, 0)).r; // reversed Z: the nearest surface around (edges follow the foreground)
 			if (d > closest) {
 				closest = d;
@@ -116,8 +122,14 @@ float4 PSTaa(FullscreenOutput input) : SV_Target {
 			}
 		}
 	}
+	k = max(k / 9.0, 1e-6);
+	[unroll] for (int i = 0; i < 9; ++i) {
+		float3 c = around[i] / (k + Luma(around[i]));
+		m1 += c;
+		m2 += c * c;
+	}
 	float3 mean = m1 / 9.0, deviation = sqrt(max(m2 / 9.0 - mean * mean, 0.0));
-	float3 current = center.rgb / (1.0 + Luma(center.rgb));
+	float3 current = center.rgb / (k + Luma(center.rgb));
 	// where this pixel's surface was on screen in the frame before: what the opaque pass wrote (the surface's own
 	// motion and the camera's; g_PostAux2), or, where nothing opaque was drawn, the camera's motion alone.
 	// (Before, a moving object's history was read at the same place on screen: a car that moved on screen was a
@@ -132,7 +144,7 @@ float4 PSTaa(FullscreenOutput input) : SV_Target {
 	bool usable = g_Jitter.z > 0.5 && all(previousUv > 0.0) && all(previousUv < 1.0);
 	float4 before = g_PostAux.SampleLevel(s_LinearClamp, previousUv, 0.0);
 	float3 history = SafeColor(before.rgb); // (what the history holds stays in it: nothing bad may enter it)
-	history *= 1.0 / (1.0 + Luma(history));
+	history *= 1.0 / (k + Luma(history));
 	history = clamp(history, mean - 1.25 * deviation, mean + 1.25 * deviation);
 	float keep = usable ? 0.9 : 0.0;
 	// The history's alpha says whether that place showed something that moves by itself (a car). Where it does not
@@ -140,7 +152,7 @@ float4 PSTaa(FullscreenOutput input) : SV_Target {
 	// the car in its history, and the colour clamp alone let part of it through as a trail along the car's outline.
 	keep *= 1.0 - smoothstep(0.2, 0.6, abs(before.a - movingNow));
 	float3 result = lerp(current, history, keep);
-	result *= 1.0 / max(1.0 - Luma(result), 1e-3);
+	result *= k / max(1.0 - Luma(result), 1e-3);
 	return float4(SafeColor(result), movingNow);
 }
 
@@ -238,7 +250,7 @@ float4 ScreenRadianceAt(float3 worldPos) {
 	if (any(previousUv < 0.0) || any(previousUv > 1.0)) {
 		return 0.0;
 	}
-	return float4(min(g_SceneColor.SampleLevel(s_LinearClamp, previousUv, 0.0).rgb, 64.0), 1.0);
+	return float4(min(g_SceneColor.SampleLevel(s_LinearClamp, previousUv, 0.0).rgb, ReuseLimit()), 1.0);
 }
 
 // What a ray from `o` along `d` (normalised) brings back.
@@ -359,6 +371,7 @@ float4 PSSunRays(FullscreenOutput input) : SV_Target {
 // of what it met (where the picture of the frame before shows that place, from there; else lit as the reflections
 // light their hits); a: how far it got (its length: nothing met).
 float4 PSAoRays(FullscreenOutput input) : SV_Target {
+	s_RayAlphaTest = false; // (leaves solid where met: see s_RayAlphaTest)
 	int2 p = min(int2(input.position.xy) * 2, int2(g_ScreenSize.xy) - 1);
 	float radius = max(g_AOParams.y, 0.05);
 	float depth = g_PostDepth.Load(int3(p, 0)).r;
@@ -491,7 +504,7 @@ float4 PSRayTrace(FullscreenOutput input) : SV_Target {
 	// meet the disc was a bright speck NRD smeared into a blotch)
 	float hitT;
 	float3 radiance = TracedRadianceT(P + N * (0.004 * viewDepth + 0.01), R, !forNrd, hitT);
-	radiance = min(radiance, 300.0);
+	radiance = min(radiance, 5.0 * ReuseLimit()); // (300 in the game's small units; physical units scale with the sky)
 	if (forNrd) {
 		// fireflies: a lobe ray that happens on something far brighter than the surroundings (a gap to the bright sky, a
 		// lamp) is held to a few times the sky's mean light, so that it does not sparkle from frame to frame (NRD
@@ -504,6 +517,9 @@ float4 PSRayTrace(FullscreenOutput input) : SV_Target {
 }
 
 float4 PSSsr(FullscreenOutput input) : SV_Target {
+	if ((int)g_Misc.x >= VIEW_ALBEDO && (int)g_Misc.x <= VIEW_MATERIAL_CLASS) {
+		return 0.0; // (the material debug views show the surface as it is: nothing added on top)
+	}
 	int2 p = int2(input.position.xy);
 	float4 surface = g_PostAux.Load(int3(p, 0));
 	float depth = g_PostDepth.Load(int3(p, 0)).r;
@@ -582,7 +598,7 @@ float4 PSSsr(FullscreenOutput input) : SV_Target {
 				float2 edge = min(previousUv, 1.0 - previousUv);
 				share = saturate(min(edge.x, edge.y) / max(g_SsrParams.w * 0.5, 1e-3));
 				if (share > 0.0) {
-					mirrored = min(g_SceneColor.SampleLevel(s_LinearClamp, previousUv, 0.0).rgb, 64.0);
+					mirrored = min(g_SceneColor.SampleLevel(s_LinearClamp, previousUv, 0.0).rgb, ReuseLimit());
 				}
 			}
 		}
@@ -594,7 +610,7 @@ float4 PSSsr(FullscreenOutput input) : SV_Target {
 		// a ray of this pixel's own, along the mirror direction
 		float3 sharp = 0.0;
 		if (halfShare < 1.0) {
-			sharp = min(TracedRadiance(origin, R, true), 600.0);
+			sharp = min(TracedRadiance(origin, R, true), 10.0 * ReuseLimit());
 		}
 		// the traced rays (g_PostAux2, half resolution): the four around this pixel, each counted by how near it lies and
 		// by whether it was traced for the same surface (its distance from the eye agrees)
@@ -809,6 +825,9 @@ float4 PSVolumetricFog(FullscreenOutput input) : SV_Target {
 // one of its four nearest texels whose depth is closest to this pixel's, so that the fog of what is behind does not
 // spill over the edges of what is in front.
 float4 PSVolumetricFogApply(FullscreenOutput input) : SV_Target {
+	if ((int)g_Misc.x >= VIEW_ALBEDO && (int)g_Misc.x <= VIEW_MATERIAL_CLASS) {
+		return float4(0.0, 0.0, 0.0, 1.0); // (no fog over the material debug views)
+	}
 	float depth = g_PostDepth.Load(int3(input.position.xy, 0)).r;
 	if (depth <= 0.0) {
 		return float4(0.0, 0.0, 0.0, 1.0);
@@ -1348,6 +1367,7 @@ float4 PSGiDepth(FullscreenOutput input) : SV_Target {
 // level's stretch; where it gets through, the next level's probes round it (the frame before) say what lies beyond.
 // g_SceneColor: the atlas of the frame before.
 float4 PSRcTrace(FullscreenOutput input) : SV_Target {
+	s_RayAlphaTest = false; // (leaves solid where met: see s_RayAlphaTest)
 	int2 p = int2(input.position.xy);
 	int level = 0;
 	[unroll] for (int k = 1; k < kRcLevels; ++k) {
@@ -1444,6 +1464,7 @@ float4 PSRcTrace(FullscreenOutput input) : SV_Target {
 // how much each probe counts for a place, steeply, and the light of a lamp's pool on a wall flickered with them.)
 // A ray that meets the inside of something counts a fifth of its length (a probe in a wall must not be believed).
 float4 PSRcDepth(FullscreenOutput input) : SV_Target {
+	s_RayAlphaTest = false; // (leaves solid where met: see s_RayAlphaTest)
 	int2 p = int2(input.position.xy);
 	int2 tile = p / 8;
 	float3 storage = float3(tile.x % kRcCounts0.x, tile.x / kRcCounts0.x, tile.y);

@@ -8,6 +8,7 @@
 #include "../Core/Log.h"
 #include "../Resources/GpuResources.h"
 #include "../Scene/SceneStore.h"
+#include "MeshLod.h"
 #include "../Shaders/ShaderManager.h"
 
 namespace aether {
@@ -176,7 +177,11 @@ bool SceneBvh::SubmitMesh(AeHandle mesh, const void* vertices, uint32_t vertexBy
 	}
 	if (job.changing) {
 		changingBuilt_.insert(mesh);
+	} else {
+		job.subMeshes.assign(subMeshes, subMeshes + subMeshCount);
+		job.indexStride = indexStride;
 	}
+	job.serial = ++serial_;
 	Enqueue(std::move(job));
 	return true;
 }
@@ -278,6 +283,7 @@ void SceneBvh::Forget(AeHandle mesh) {
 	{
 		std::lock_guard lock(mutex_);
 		pendingForget_.push_back(mesh);
+		MeshLods::Get().Forget(mesh, serial_); // (its levels of detail go with it)
 		pendingPoseLayouts_.erase(std::remove_if(pendingPoseLayouts_.begin(), pendingPoseLayouts_.end(), [mesh](const PoseLayout& l) { return l.mesh == mesh; }), pendingPoseLayouts_.end());
 	}
 	if (wasChanging) {
@@ -301,6 +307,7 @@ void SceneBvh::Clear() {
 	pendingAliases_.clear();
 	pendingPoseLayouts_.clear();
 	pendingForget_.clear();
+	MeshLods::Get().Clear();
 }
 
 // ------------------------------------------------------------------------------------------------ worker
@@ -352,6 +359,11 @@ void SceneBvh::WorkerMain() {
 		--pendingJobs_;
 		if (built.generation == generation_.load() && !built.tris.empty()) {
 			built_.push_back(std::move(built));
+			// a mesh whose vertices stay: its levels of detail are made from the same geometry (on a worker of their
+			// own; under this lock, so that a Clear or Forget on the main thread cannot fall in between)
+			if (job.kind == JobKind::Build && !job.changing && !job.subMeshes.empty()) {
+				MeshLods::Get().Submit(job.serial, job.mesh, std::move(job.positions), std::move(job.indices), std::move(job.triSubMesh), std::move(job.subMeshes), job.indexStride);
+			}
 		}
 	}
 }
@@ -653,10 +665,11 @@ void SceneBvh::BeginInstances() {
 	instances_.clear();
 	instanceWorld_.clear();
 	instanceMesh_.clear();
+	instanceAlpha_.clear();
 	frameInstanceTris_ = 0;
 }
 
-bool SceneBvh::AddInstance(AeHandle mesh, const Mat4& world, uint32_t skipSubMeshes, uint32_t materialOffset, uint32_t doubleSided, bool mirrored) {
+bool SceneBvh::AddInstance(AeHandle mesh, const Mat4& world, uint32_t skipSubMeshes, uint32_t materialOffset, uint32_t doubleSided, bool mirrored, bool alphaTested) {
 	auto alias = aliases_.find(mesh);
 	auto it = meshes_.find(alias != aliases_.end() ? alias->second : mesh);
 	// (only meshes whose triangles the GPU already has)
@@ -693,6 +706,7 @@ bool SceneBvh::AddInstance(AeHandle mesh, const Mat4& world, uint32_t skipSubMes
 	instances_.push_back(instance);
 	instanceWorld_.push_back(world);
 	instanceMesh_.push_back(it->first);
+	instanceAlpha_.push_back(alphaTested ? 1 : 0);
 	frameInstanceTris_ += it->second.triCount;
 	return true;
 }
@@ -733,7 +747,7 @@ bool SceneBvh::EndInstances(ID3D12Device* device, ID3D12GraphicsCommandList* lis
 		{"topLevelBytes", tlas_ ? tlas_->GetDesc().Width : 0},
 		{"gpuPose", {{"meshes", poses_.size()}, {"budget", poseBudget_.load()}, {"candidates", poseCandidatesFrame_}, {"refitted", poseRefitsFrame_}, {"refitsTotal", poseRefitsTotal_},
 			{"skipped", poseSkipped_}, {"lastSkip", poseLastSkip_}, {"cpuMs", poseCpuMs_}, {"pipeline", posePipeline_ != nullptr}}},
-		{"frame", {{"instances", instances_.size()}, {"instanceTriangles", frameInstanceTris_}, {"traced", ok}, {"cpuMs", NowMs() - start}}},
+		{"frame", {{"instances", instances_.size()}, {"opaqueInstances", opaqueInstances_}, {"instanceTriangles", frameInstanceTris_}, {"traced", ok}, {"cpuMs", NowMs() - start}}},
 	};
 	return ok;
 }
@@ -1121,6 +1135,7 @@ bool SceneBvh::BuildStructures(ID3D12Device* device, ID3D12GraphicsCommandList* 
 		return false;
 	}
 	auto* out = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(descs.cpu);
+	opaqueInstances_ = 0;
 	for (uint32_t i = 0; i < count; ++i) {
 		D3D12_RAYTRACING_INSTANCE_DESC d = {};
 		for (int r = 0; r < 3; ++r) {
@@ -1134,9 +1149,20 @@ bool SceneBvh::BuildStructures(ID3D12Device* device, ID3D12GraphicsCommandList* 
 		d.InstanceID = has ? t.triBase : 0;
 		d.InstanceMask = has ? 0xFF : 0;
 		d.AccelerationStructure = has ? b->second.buffer->GetGPUVirtualAddress() : anyBlas;
-		// Opaque unless some of its sub meshes are not there for rays or are double sided: those are decided per
-		// triangle in the shader (and their back faces are not culled by the ray's flag).
-		d.Flags = t.skipSubMeshes == 0 && t.doubleSided == 0 ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE : (D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE | D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE);
+		// Opaque (the hardware decides, no shader per triangle) unless the shader must look at its triangles: some
+		// sub meshes not there for rays, some alpha tested, or some double sided and some not. All of its sub meshes
+		// double sided is opaque too, with the back faces not culled. (Every double sided instance went through the
+		// shader before: on a forest map, its foliage made each ray run the shader for every leaf it passed.)
+		const uint32_t subMeshCount = std::min<uint32_t>((t.materialOffset >> 24) & 0x7Fu, 32u);
+		const uint32_t all = subMeshCount >= 32 ? 0xFFFFFFFFu : (1u << subMeshCount) - 1u;
+		const bool alpha = i < instanceAlpha_.size() && instanceAlpha_[i] != 0;
+		const bool twoSided = subMeshCount > 0 && (t.doubleSided & all) == all;
+		if (t.skipSubMeshes == 0 && !alpha && (t.doubleSided == 0 || twoSided)) {
+			d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE | (twoSided ? D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE : D3D12_RAYTRACING_INSTANCE_FLAG_NONE);
+			opaqueInstances_++;
+		} else {
+			d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE | D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
+		}
 		out[i] = d;
 	}
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};

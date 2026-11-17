@@ -46,6 +46,8 @@ struct SettingsData {
 	bool followSceneNight = true;    // the physical sky turns to night when the game's scene does (its day / night switch)
 	bool radianceCascades = true;    // the indirect light everywhere from radiance cascades (needs the ray tracing geometry); off: the probe grid
 	bool rayTracedGi = false;        // the opaque surfaces' ambient light per pixel from long rays (with rayTracedLighting) instead of the cascades or the probes
+	bool shadowCaching = true;       // the far shadow cascades are drawn in turns (every 2nd / 4th frame), kept in between
+	bool naturalTiling = true;       // large static surfaces sample their textures with hex tiling and a slow brightness variation (no visible repeats)
 	bool lampShadows = true;         // lamps (and head lamps) that cast shadows are shadowed by rays (needs the ray tracing geometry)
 	bool rayTracedLighting = true;   // the sun's shadow and the ambient occlusion from rays (NRD SIGMA, REBLUR); off: shadow map and screen space occlusion
 	bool lensFlare = true;           // ghosts, a halo and rays from the sun and from bright lamps, as a camera's lens makes them
@@ -76,6 +78,7 @@ struct SettingsData {
 	float fogStrength = 1.0f;      // 0 .. 20: factor on the fog density (physical sky: the air's own haze; else the scene's fog)
 	float smokeOpacity = 1.0f; // Tyre smoke opacity factor
 	float lodBias = 2.8f; // Unity's LOD bias: higher keeps detailed models up to a greater distance
+	bool autoLod = true;  // static meshes far away are drawn with simplified triangles (automatic levels of detail, Renderer/MeshLod.h)
 	int anisotropicLevel = 8; // Anisotropic texture filtering level
 	int vsync = 1; // Vertical sync: 0 off, 1 every refresh, 2 every second refresh
 	std::string tonemap = "host";    // host (the curve of the game renderer) | agx | aces | neutral | none

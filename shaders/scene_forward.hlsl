@@ -368,6 +368,96 @@ float4 LayerTexture(uint index, float2 uv, float4 none) {
 	return index == 0xFFFFFFFFu ? none : g_SceneTextures[NonUniformResourceIndex(index)].SampleBias(s_Aniso, uv, g_Upscale.x);
 }
 
+// ---- natural tiling (setting naturalTiling): hex tiling after Mikkelsen 2022, "Practical Real-Time Hex-Tiling"
+// (JCGT 11(2); MIT). The uv plane is covered with hexagons one texture repeat across; every hexagon samples the
+// texture shifted and turned by its own random amount, and a pixel blends the three hexagons around it, by how near
+// it is to each and by the samples' brightness (the brighter wins: the blend reads as one material, not a smear).
+// A repeated texture then shows no pattern. On large static surfaces only (InstanceData.layers.z).
+struct HexTile {
+	float2 uv[3];
+	float2 dx[3];
+	float2 dy[3];
+	float2x2 rot[3];
+	float3 w; // the three hexagons' barycentric weights
+};
+
+float2 HexHash2(float2 p) {
+	float2 r = mul(float2x2(127.1, 311.7, 269.5, 183.3), p);
+	return frac(sin(r) * 43758.5453);
+}
+
+float2x2 HexRotation(int2 id) {
+	float a = abs(float(id.x * id.y)) + abs(float(id.x + id.y)) + PI;
+	a = fmod(a, 2.0 * PI);
+	a = a > PI ? a - 2.0 * PI : a;
+	a *= 0.6; // (turned up to about 108 degrees: enough to break the pattern, not so much that directional detail lies across)
+	float c = cos(a), sn = sin(a);
+	return float2x2(c, -sn, sn, c);
+}
+
+HexTile MakeHexTile(float2 st, float mipBias) {
+	HexTile h;
+	const float2 dx = ddx(st) * exp2(mipBias), dy = ddy(st) * exp2(mipBias);
+	const float kScale = 2.0 * 1.7320508; // 2 sqrt 3: hexagons one repeat across
+	float2 sk = mul(float2x2(1.0, -0.57735027, 0.0, 1.15470054), st * kScale);
+	int2 cell = int2(floor(sk));
+	float3 t = float3(frac(sk), 0.0);
+	t.z = 1.0 - t.x - t.y;
+	float sgn = step(0.0, -t.z), s2 = 2.0 * sgn - 1.0;
+	h.w = float3(-t.z * s2, sgn - t.y * s2, sgn - t.x * s2);
+	int is = int(sgn);
+	int2 v[3] = {cell + int2(is, is), cell + int2(is, 1 - is), cell + int2(1 - is, is)};
+	[unroll] for (int i = 0; i < 3; ++i) {
+		float2 centre = mul(float2x2(1.0, 0.5, 0.0, 1.0 / 1.15470054), float2(v[i])) / kScale;
+		h.rot[i] = HexRotation(v[i]);
+		h.uv[i] = mul(st - centre, h.rot[i]) + centre + HexHash2(float2(v[i]));
+		h.dx[i] = mul(dx, h.rot[i]);
+		h.dy[i] = mul(dy, h.rot[i]);
+	}
+	return h;
+}
+
+// the blend weights, from the base colour's three samples
+float3 HexWeights(HexTile h, float4 c0, float4 c1, float4 c2) {
+	const float3 luma = float3(0.299, 0.587, 0.114);
+	float3 d = lerp(1.0, float3(dot(c0.rgb, luma), dot(c1.rgb, luma), dot(c2.rgb, luma)), 0.6);
+	float3 w = d * pow(max(h.w, 0.0), 7.0);
+	return w / max(w.x + w.y + w.z, 1e-6);
+}
+
+float4 HexSample(Texture2D t, HexTile h, int i) {
+	return t.SampleGrad(s_Aniso, h.uv[i], h.dx[i], h.dy[i]);
+}
+
+float4 HexBlend(Texture2D t, HexTile h, float3 w) {
+	return HexSample(t, h, 0) * w.x + HexSample(t, h, 1) * w.y + HexSample(t, h, 2) * w.z;
+}
+
+// a normal map through the same hexagons: each sample's tangent plane turned back by its hexagon's rotation
+float3 HexNormal(Texture2D t, HexTile h, float3 w, float scale) {
+	float3 n = 0.0;
+	[unroll] for (int i = 0; i < 3; ++i) {
+		float3 ni = UnpackNormal(HexSample(t, h, i), scale);
+		ni.xy = mul(h.rot[i], ni.xy);
+		n += ni * w[i];
+	}
+	return normalize(n);
+}
+
+// A slow variation of brightness over the ground (two octaves of value noise, 25 m and 6 m): large surfaces of one
+// material are never quite even in the world (wear, damp, dust); without it a slope or a car park still looked printed.
+float ValueNoise2(float2 p) {
+	float2 i = floor(p), f = frac(p);
+	float2 u = f * f * (3.0 - 2.0 * f);
+	float a = Hash31(float3(i, 7.0)), b = Hash31(float3(i + float2(1, 0), 7.0)), c = Hash31(float3(i + float2(0, 1), 7.0)), d = Hash31(float3(i + float2(1, 1), 7.0));
+	return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+float MacroVariation(float3 worldPos) {
+	float n = ValueNoise2(worldPos.xz / 25.0) * 0.65 + ValueNoise2(worldPos.xz / 6.0 + 17.0) * 0.35;
+	return lerp(0.86, 1.10, n);
+}
+
 float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	surface = 0.0;
 	MaterialData mat = g_Materials[g_MaterialIndex];
@@ -385,10 +475,23 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 		return float4(lerp(float3(1.0, 0.0, 1.0), float3(0.1, 0.0, 0.1), checker) * (0.35 + 0.65 * saturate(dot(n, g_SunDirection.xyz))) * 2.0, 1.0);
 	}
 
-	float4 base = SampleMaterial(g_BaseMap, input.uv);
+	// natural tiling: large static surfaces of the plain classes, not alpha tested (a blend of three alpha samples
+	// would move the cut-out's edge)
+	const bool hexOn = g_Instances[input.instance].layers.z > 0.5 && (materialClass == CLASS_STANDARD || materialClass == CLASS_COLOR_MASK) && mat.params.z < 0.0;
+	HexTile hex = (HexTile)0;
+	float3 hexW = float3(1.0, 0.0, 0.0);
+	float4 base;
+	if (hexOn) {
+		hex = MakeHexTile(input.uv, g_Upscale.x);
+		float4 c0 = HexSample(g_BaseMap, hex, 0), c1 = HexSample(g_BaseMap, hex, 1), c2 = HexSample(g_BaseMap, hex, 2);
+		hexW = HexWeights(hex, c0, c1, c2);
+		base = c0 * hexW.x + c1 * hexW.y + c2 * hexW.z;
+	} else {
+		base = SampleMaterial(g_BaseMap, input.uv);
+	}
 	Surface s;
 	float paintMirror = 0.0; // body paint: 1 = chrome
-	s.albedo = base.rgb * mat.baseColor.rgb;
+	s.albedo = base.rgb * mat.baseColor.rgb * (hexOn ? MacroVariation(input.worldPos) : 1.0);
 	s.alpha = base.a * mat.baseColor.a;
 	s.metallic = mat.emissiveMetallic.a;
 	s.roughness = mat.params.x;
@@ -404,7 +507,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 
 	// ---- mask / pack map
 	if (mat.params3.y > 0.5) {
-		float4 m = SampleMaterial(g_MaskMap, input.uv);
+		float4 m = hexOn ? HexBlend(g_MaskMap, hex, hexW) : SampleMaterial(g_MaskMap, input.uv);
 		if (mat.params3.x < 1.5) { // HDRP: R metallic, G occlusion, A smoothness
 			s.metallic *= m.r;
 			s.roughness = 1.0 - (1.0 - s.roughness) * m.a;
@@ -544,7 +647,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	if (mat.params3.z > 0.5 || layered) {
 		float3 T = normalize(input.tangent.xyz - N * dot(N, input.tangent.xyz));
 		float3 B = cross(N, T) * input.tangent.w;
-		float3 n = layered ? layerTangentNormal : UnpackNormal(SampleMaterial(g_NormalMap, input.uv), mat.params.y);
+		float3 n = layered ? layerTangentNormal : hexOn ? HexNormal(g_NormalMap, hex, hexW, mat.params.y) : UnpackNormal(SampleMaterial(g_NormalMap, input.uv), mat.params.y);
 		N = normalize(T * n.x + B * n.y + N * n.z);
 	}
 	if (!outside) {
@@ -738,7 +841,7 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 			BvhHit hit = BvhTrace(input.worldPos + N * (0.004 * input.viewDepth + 0.01), R, 300.0, false);
 			float4 mirroredSurface = hit.t < 0.0 ? float4(0.0, 0.0, 0.0, 0.0) : BvhHitSurface(input.worldPos + R * hit.t, hit, hit.t, R);
 			// (a hit the texture's alpha cuts away: the sky, as if nothing were there. One ray per pixel here.)
-			mirroredFrom = mirroredSurface.a > 0.5 ? min(mirroredSurface.rgb, 64.0) : SkyRadiance(R, 0.0);
+			mirroredFrom = mirroredSurface.a > 0.5 ? min(mirroredSurface.rgb, ReuseLimit()) : SkyRadiance(R, 0.0);
 		} else {
 			mirroredFrom = EnvironmentSpecular(input.worldPos, R, 0.03);
 		}

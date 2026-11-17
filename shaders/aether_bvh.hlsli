@@ -42,6 +42,21 @@ struct BvhHit {
 	uint back;      // 1: the triangle was met from behind (only with backFaces)
 };
 
+// A hit's entry in g_RayMaterials: x its index in g_Materials, y its base texture (0xFFFFFFFF: none). A sub mesh past the
+// instance's entries, or a texture index past the heap, is taken as no texture (never read: a stray index made the GPU
+// fault and the device was lost).
+uint2 BvhHitMaterial(TlasInstance inst, BvhTri tri) {
+	uint count = (inst.materialOffset >> 24) & 0x7Fu;
+	if (tri.subMesh >= count) {
+		return uint2(0u, 0xFFFFFFFFu);
+	}
+	uint2 entry = g_RayMaterials[(inst.materialOffset & 0x00FFFFFFu) + tri.subMesh];
+	if (entry.y >= 65536u) {
+		entry.y = 0xFFFFFFFFu;
+	}
+	return entry;
+}
+
 // The nearest triangle along o + d t for t in (0, tMax). `anyHit`: stop at the first one found (shadow rays).
 // `backFaces`: single sided triangles met from behind count too (hit.back says so): for the GI probes, which must
 // know when they look at the inside of something.
@@ -78,6 +93,24 @@ BvhHit BvhTraceEx(float3 o, float3 d, float tMax, bool anyHit, bool backFaces) {
 		if (behind && !backFaces) {
 			continue;
 		}
+		// alpha tested materials (leaves, fences): through where the base texture's alpha is cut away, here in the
+		// walk (the ray goes on past the hole; before, the nearest triangle was taken and the caller traced again
+		// behind it, up to three times, and a dense tree stopped rays at its holes)
+		if (s_RayAlphaTest) {
+			BvhTri ct = g_BvhTris[q.CandidateInstanceID() + q.CandidatePrimitiveIndex()];
+			uint2 entry = BvhHitMaterial(inst, ct);
+			if (entry.y != 0xFFFFFFFFu) {
+				MaterialData m = g_Materials[entry.x];
+				if (m.params.z >= 0.0) {
+					float2 b2 = q.CandidateTriangleBarycentrics();
+					float2 uv = (float2(ct.uvU, ct.uvV) + ct.duv1 * b2.x + ct.duv2 * b2.y) * m.uvScaleOffset.xy + m.uvScaleOffset.zw;
+					float a = g_SceneTextures[NonUniformResourceIndex(entry.y)].SampleLevel(s_Aniso, uv, 1.0 + 0.7 * log2(max(q.CandidateTriangleRayT(), 1.0))).a;
+					if (a * m.baseColor.a < m.params.z) {
+						continue;
+					}
+				}
+			}
+		}
 		q.CommitNonOpaqueTriangleHit();
 		if (anyHit) {
 			q.Abort();
@@ -103,21 +136,6 @@ BvhHit BvhTraceEx(float3 o, float3 d, float tMax, bool anyHit, bool backFaces) {
 
 BvhHit BvhTrace(float3 o, float3 d, float tMax, bool anyHit) {
 	return BvhTraceEx(o, d, tMax, anyHit, false);
-}
-
-// A hit's entry in g_RayMaterials: x its index in g_Materials, y its base texture (0xFFFFFFFF: none). A sub mesh past the
-// instance's entries, or a texture index past the heap, is taken as no texture (never read: a stray index made the GPU
-// fault and the device was lost).
-uint2 BvhHitMaterial(TlasInstance inst, BvhTri tri) {
-	uint count = (inst.materialOffset >> 24) & 0x7Fu;
-	if (tri.subMesh >= count) {
-		return uint2(0u, 0xFFFFFFFFu);
-	}
-	uint2 entry = g_RayMaterials[(inst.materialOffset & 0x00FFFFFFu) + tri.subMesh];
-	if (entry.y >= 65536u) {
-		entry.y = 0xFFFFFFFFu;
-	}
-	return entry;
 }
 
 // Whether a hit is solid there: an alpha tested material (leaves, fences) lets the ray through where its base

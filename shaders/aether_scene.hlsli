@@ -71,7 +71,7 @@ struct InstanceData {
 	float4 normalRow0; // rows of the inverse transpose of the world's upper 3x3; w of row0 = handedness (-1 for mirrored)
 	float4 normalRow1;
 	float4 normalRow2;
-	float4 layers; // x: Renderer.renderingLayerMask as uint bits (asuint), y: 1 = moved since the frame before
+	float4 layers; // x: Renderer.renderingLayerMask as uint bits (asuint), y: 1 = moved since the frame before, z: 1 = natural tiling
 	float4x4 prevWorld; // the world matrix of the frame before
 };
 
@@ -425,6 +425,12 @@ float3 OctDecode(float2 uv) {
 	return normalize(n);
 }
 
+// The most a colour reused from the picture of the frame before (for a ray's hit, a mirror) may be: 64 times the sky's
+// mean light, never under 64. (A plain 64 held for the game's own tracks, lit in small numbers; a map lit in physical
+// units, a 100 000 lux sun, has thousands in every sunlit pixel and every reused colour was clipped to grey.)
+// (defined after AmbientDiffuse, below)
+float ReuseLimit();
+
 float3 AmbientDiffuse(float3 n) {
 	if (g_Misc.y > 0.5) {
 		// the sky convolved with the cosine lobe (irradiance / PI), made every frame from the sky cube: PSIrradiance
@@ -443,6 +449,11 @@ static const float3 kGiCounts = float3(24.0, 8.0, 24.0);
 static const float kGiTile = 8.0;
 static bool s_NoSkyFallback = false; // set by the pass whose rays bring the sky themselves: no unoccluded sky in AmbientLight
 static bool s_GiOff = false; // set by the pass that must not read the probes (they hold nothing yet)
+// cleared by the passes whose rays gather light broadly (GI, ambient occlusion): an alpha tested triangle (a leaf) is
+// taken as solid where it is met, without reading its texture. Their rays look through leaves on average anyway, and
+// tested texel by texel on a forest map they went on through every hole: GI rays 5.5 -> 9.4 ms. What is seen (shadows,
+// reflections, the path tracer) keeps the test.
+static bool s_RayAlphaTest = true;
 static bool s_RcTracing = false; // set by PSRcTrace: the light per normal it reads is the frame before's (RcIrradiance)
 
 float3 GiStorage(float3 cell) {
@@ -691,4 +702,8 @@ float SunShadowIn(Texture2D atlas, float scale, float3 worldPos, float3 normal, 
 
 float SunShadow(float3 worldPos, float3 normal, float viewDepth, out uint cascade) {
 	return SunShadowIn(g_ShadowAtlas, 1.0, worldPos, normal, cascade);
+}
+
+float ReuseLimit() {
+	return max(64.0, 64.0 * dot(AmbientDiffuse(float3(0.0, 1.0, 0.0)) * g_Misc.w, float3(0.2126, 0.7152, 0.0722)));
 }

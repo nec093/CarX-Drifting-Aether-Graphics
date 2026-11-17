@@ -1,4 +1,5 @@
 #include "Bvh.h"
+#include "MeshLod.h"
 #include "Dlss.h"
 #include "ReflectionDenoiser.h"
 #include "LightingDenoiser.h"
@@ -9,6 +10,7 @@
 #include "../Shaders/ShaderManager.h"
 
 #include <algorithm>
+#include <cfloat>
 
 namespace aether {
 
@@ -30,6 +32,7 @@ const uint32_t kPostTableSize = 4;    // per full screen pass: colour / main inp
 // per second: the automatic exposure covers 63 % of a change to a brighter scene in a third of a second, to a darker one
 // in a second and a quarter (eyes close down fast and open up slowly)
 const float kExposureBrightenRate = 3.0f;
+const float kNaturalTilingRadius = 12.0f; // m: a mesh this large or larger is taken to tile its textures over the ground
 const float kExposureDarkenRate = 0.8f;
 const uint32_t kPostTables = 64;     // 0..3: ambient occlusion, its blur, composite, exposure metering; the rest handed out per pass (Fullscreen)
 const uint32_t kIrradianceSize = 32;  // octahedral map of the sky's diffuse light
@@ -773,6 +776,15 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 	const Mat4 viewProj = Mat4::From(scene.frame.proj) * view;
 	Plane planes[6];
 	FrustumPlanes(viewProj, planes);
+	// automatic levels of detail: pixels per unit of length one unit from the camera (the projection's vertical scale
+	// over half the drawn height; the height of the frame before: the render size is settled after this)
+	const float lodPixelsPerUnit = std::abs(Mat4::From(scene.frame.proj).at(1, 1)) * 0.5f * float(renderHeight_ > 0 ? renderHeight_ : 1080u);
+	for (uint32_t l = 0; l < 4; ++l) {
+		lodInstances_[l] = 0;
+		lodTriangles_[l] = 0;
+	}
+	lodInstancesWithout_ = 0;
+	lodFullTriangles_ = 0;
 
 	for (auto& [handle, inst] : store.Instances()) {
 		if (inst.frameStamp != frame || !inst.visible) {
@@ -811,6 +823,10 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 		id.normalRow0[3] = mirrored ? -1.0f : 1.0f;
 		memcpy(&id.reserved[0], &inst.desc.renderingLayerMask, sizeof(uint32_t)); // read with asuint in the shader
 		id.reserved[1] = inst.moved ? 1.0f : 0.0f;
+		// z: natural tiling (hex tiling and a slow variation of brightness, setting naturalTiling). On what repeats its
+		// textures over a large area: static meshes larger than a house (ground, roads, slopes, walls); small props and
+		// cars keep their textures as they are (their textures are unique, and the three samples would cost for nothing)
+		id.reserved[2] = naturalTiling_ && (inst.desc.flags & kAeInstanceStatic) && radius > kNaturalTilingRadius ? 1.0f : 0.0f;
 		memcpy(id.prevWorld, inst.prevWorld.m, sizeof(id.prevWorld));
 		const uint32_t instanceIndex = instanceCount_++;
 		instanceData_.resize(size_t(instanceCount_) * sizeof(InstanceData));
@@ -818,6 +834,17 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 
 		const Vec3 viewPos = TransformPoint(view, center);
 		const size_t castersBefore = casters_.size();
+		// the level of detail: the coarsest whose error (in the mesh's units, times the instance's scale) covers no more
+		// than lodPixelError_ pixels where the bounding sphere is nearest the camera (inside it: the mesh in full)
+		const MeshLodSet* lods = autoLod_ ? MeshLods::Get().Find(inst.desc.mesh, *mesh) : nullptr;
+		uint32_t lod = 0;
+		if (lods) {
+			const float nearest = Length(center - cameraNow) - radius;
+			const float pixelsPerUnit = nearest > 0.0f ? lodPixelsPerUnit * scale / nearest : FLT_MAX;
+			while (lod < lods->levels && lods->error[lod + 1] * pixelsPerUnit <= lodPixelError_) {
+				++lod;
+			}
+		}
 		const uint32_t subMeshes = std::min<uint32_t>(uint32_t(mesh->subMeshes.size()), uint32_t(inst.materials.size()));
 		for (uint32_t s = 0; s < subMeshes; ++s) {
 			if (mesh->subMeshes[s].indexCount == 0) {
@@ -898,6 +925,12 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 			item.center = center;
 			item.radius = radius;
 			item.castsShadow = castsShadow && !(flags & (kAeMaterialBlend | kAeMaterialNoShadow));
+			// (a layered material blending its layers by the vertex colour is drawn in full: the simplifier saw the
+			// positions only, and the colours painted between the vertices it took away would be lost)
+			const bool vertexColours = material && material->desc.layerCount > 1 && material->desc.layerVertexColor != 0;
+			item.lods = lods;
+			item.lod = vertexColours ? 0 : lod;
+			item.lodScale = scale;
 			item.sortKey = (uint64_t(mesh->layoutId) << 48) | (uint64_t(item.cull) << 46) | (uint64_t((flags & kAeMaterialAlphaTest) ? 1 : 0) << 45) |
 				((uint64_t(reinterpret_cast<uintptr_t>(material)) >> 4 & 0xFFFFF) << 24) | (uint64_t(reinterpret_cast<uintptr_t>(mesh)) >> 4 & 0xFFFFFF);
 			if (item.castsShadow) {
@@ -914,6 +947,11 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 			if (!inView) {
 				continue;
 			}
+			{
+				const uint64_t full = mesh->subMeshes[s].indexCount / 3;
+				lodFullTriangles_ += full;
+				lodTriangles_[item.lod] += item.lod > 0 ? lods->Count(item.lod, s) / 3 : full;
+			}
 			if (material && material->desc.materialClass == kAeMaterialBlobShadow) {
 				// a box around the place it darkens: its far side is drawn (the camera may be inside it), without depth test
 				item.cull = mirrored ? kCullBack : kCullFront;
@@ -924,12 +962,16 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 				opaque_.push_back(item);
 			}
 		}
+		if (inView) {
+			++(lods ? lodInstances_[lod] : lodInstancesWithout_);
+		}
 		bool traced = false;
 		if (inRays) {
 			// Not there for rays: what is not a surface (the cars' blob shadow boxes, helper geometry, materials Aether does
 			// not translate) and what light goes through (glass, anything blended): a bit per sub mesh. The others'
 			// materials go into the table a hit looks its colour up in.
 			uint32_t skip = 0, kept = 0, twoSided = 0;
+			bool alphaTested = false;
 			const uint32_t materialOffset = uint32_t(rayMaterials_.size() / 2);
 			// (an entry for every sub mesh the mesh's triangles may name, also beyond the renderer's materials: a ray that
 			// lands on such a triangle read past this instance's part of the table, and with a stray texture index the
@@ -950,6 +992,9 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 				if (material && (material->desc.flags & kAeMaterialDoubleSided) && s < 32) {
 					twoSided |= 1u << s;
 				}
+				if (solid && (material->desc.flags & kAeMaterialAlphaTest)) {
+					alphaTested = true;
+				}
 				rayMaterials_.push_back(material && material->frameStamp == frame ? material->frameIndex : 0);
 				// (the texture a hit on this sub mesh is coloured with)
 				SceneTexture* base = material && material->desc.textures[kAeSlotBase] ? store.Texture(material->desc.textures[kAeSlotBase]) : nullptr;
@@ -959,7 +1004,7 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 				}
 			}
 			if (kept > 0) {
-				traced = SceneBvh::Get().AddInstance(inst.desc.mesh, world, skip, materialOffset | (count << 24), twoSided, mirrored);
+				traced = SceneBvh::Get().AddInstance(inst.desc.mesh, world, skip, materialOffset | (count << 24), twoSided, mirrored, alphaTested);
 			}
 		}
 		if (!traced) {
@@ -971,7 +1016,8 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 		rayMaterials_.push_back(0);
 		rayMaterials_.push_back(UINT32_MAX);
 	}
-	auto byKey = [](const DrawItem& a, const DrawItem& b) { return a.sortKey != b.sortKey ? a.sortKey < b.sortKey : a.subMesh < b.subMesh; };
+	// (and level by level: instances drawn at another level of detail are another draw)
+	auto byKey = [](const DrawItem& a, const DrawItem& b) { return a.sortKey != b.sortKey ? a.sortKey < b.sortKey : a.subMesh != b.subMesh ? a.subMesh < b.subMesh : a.lod < b.lod; };
 	std::sort(opaque_.begin(), opaque_.end(), byKey);
 	std::sort(casters_.begin(), casters_.end(), byKey);
 	std::sort(untracedCasters_.begin(), untracedCasters_.end(), byKey);
@@ -1046,8 +1092,18 @@ void SceneRenderer::UpdateProbes(const SceneFrame& scene, uint64_t frame) {
 		lightProbes_[slot].lastWanted = frame;
 		wanted[k] = slot;
 	}
-	// this frame's faces: unfinished probes first (the nearest to the camera), else the probe drawn longest ago
-	for (uint32_t j = 0; j < _countof(probeJobs_); ++j) {
+	// this frame's faces: unfinished probes first (the nearest to the camera), else the probe drawn longest ago.
+	// When every probe holds a whole picture, one face every fourth frame keeps them up to date with the light (the
+	// time of day moves slowly; moving things are not drawn into them): drawing two faces every frame of a probe
+	// already whole cost 3 ms on a forest map.
+	bool allWhole = true;
+	for (uint32_t s = 0; s < kProbeSlots; ++s) {
+		if (lightProbes_[s].used && lightProbes_[s].facesDone != 0x3Fu) {
+			allWhole = false;
+		}
+	}
+	const uint32_t faceJobs = allWhole ? (frame % 4 == 0 ? 1u : 0u) : uint32_t(_countof(probeJobs_));
+	for (uint32_t j = 0; j < faceJobs; ++j) {
 		int best = -1;
 		float bestScore = 0;
 		// (Every probe that holds a picture, not only the ones wanted this frame: the others are still read where
@@ -1289,6 +1345,31 @@ void SceneRenderer::BuildCascades(const SceneFrame& scene, const SettingsData& s
 		cascades_.push_back(c);
 		sliceNear = sliceFar;
 	}
+	// The far cascades are drawn in turns (setting shadowCaching): the third every second frame, the fourth every
+	// fourth, keeping their map and matrices from the frame they were drawn in between. They cover hundreds of metres
+	// and move little; a car's shadow out there lags a frame or three. All are drawn again at once when the sun turns,
+	// the map is made again, or the camera has gone a tenth of a cascade's width since.
+	cascadeDraw_.assign(cascades_.size(), true);
+	const bool reset = !settings.shadowCaching || shadowCache_.size() != cascades_.size() || Dot(sunDirection_, cachedSunDirection_) < 0.999999f ||
+		cachedCascadeSize_ != shadowCascadeSize_ || cachedAtlas_ != shadowAtlas_.get();
+	for (size_t i = 2; i < cascades_.size() && !reset; ++i) {
+		const uint64_t interval = i == 2 ? 2 : 4;
+		const bool turn = (frame_ % interval) == (i % interval);
+		const Cascade& old = shadowCache_[i];
+		if (!turn && Length(cascades_[i].center - old.center) < old.radius * 0.1f && std::abs(cascades_[i].splitFar - old.splitFar) < old.splitFar * 0.05f) {
+			cascades_[i] = old;
+			cascadeDraw_[i] = false;
+		}
+	}
+	shadowCache_.resize(cascades_.size());
+	for (size_t i = 0; i < cascades_.size(); ++i) {
+		if (cascadeDraw_[i]) {
+			shadowCache_[i] = cascades_[i];
+		}
+	}
+	cachedSunDirection_ = sunDirection_;
+	cachedCascadeSize_ = shadowCascadeSize_;
+	cachedAtlas_ = shadowAtlas_.get();
 }
 
 void SceneRenderer::BuildClusters(const SceneFrame& scene) {
@@ -1990,9 +2071,25 @@ void SceneRenderer::DrawItems(RenderGraph::PassContext& ctx, const std::vector<D
 	ID3D12GraphicsCommandList* list = ctx.list;
 	ID3D12PipelineState* boundPso = nullptr;
 	const SceneMesh* boundMesh = nullptr;
+	D3D12_GPU_VIRTUAL_ADDRESS boundIndices = 0;
 	uint32_t boundTable = UINT32_MAX;
+	// The level of detail an item is drawn at here: the one picked for the camera; in a shadow cascade as coarse as
+	// keeps the error under half a texel of the cascade's map (no coarser: the caster would stand off its own surface)
+	auto levelOf = [&](const DrawItem& item) -> uint32_t {
+		uint32_t level = item.lods ? item.lod : 0;
+		if (item.lods && opaqueKind == kForwardProbe) {
+			return item.lods->levels; // (a probe face is a small picture of what is around: the coarsest level shows the same)
+		}
+		if (item.lods && cascade >= 0) {
+			const float allowed = 0.5f * cascades_[size_t(cascade)].texelWorld;
+			while (level < item.lods->levels && item.lods->error[level + 1] * item.lodScale <= allowed) {
+				++level;
+			}
+		}
+		return level;
+	};
 	// a run of items that differ in nothing but the instance is one draw
-	struct Batch { const DrawItem* first = nullptr; ID3D12PipelineState* pso = nullptr; uint32_t table = 0, start = 0, count = 0; } batch;
+	struct Batch { const DrawItem* first = nullptr; ID3D12PipelineState* pso = nullptr; uint32_t table = 0, start = 0, count = 0, level = 0; } batch;
 	auto flush = [&]() {
 		if (!batch.first) {
 			return;
@@ -2010,10 +2107,19 @@ void SceneRenderer::DrawItems(RenderGraph::PassContext& ctx, const std::vector<D
 			}
 			list->IASetVertexBuffers(0, mesh.desc.streamCount, views);
 			list->IASetVertexBuffers(kDefaultsSlot, 1, &defaultsView_);
-			// (sizes were checked against the buffers when the mesh was registered: SceneStore::Apply)
-			D3D12_INDEX_BUFFER_VIEW ib = {mesh.indexBuffer->GetGPUVirtualAddress(), mesh.desc.indexCount * mesh.desc.indexStride, mesh.desc.indexStride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
-			list->IASetIndexBuffer(&ib);
 			boundMesh = item.mesh;
+			boundIndices = 0; // (meshes may share an index buffer with another size)
+		}
+		// the mesh's own indices, or its level of detail's (drawn with the mesh's vertex buffers and base vertex)
+		const bool lodDraw = batch.level > 0;
+		const D3D12_GPU_VIRTUAL_ADDRESS indices = lodDraw ? item.lods->view.BufferLocation : item.mesh->indexBuffer->GetGPUVirtualAddress();
+		if (indices != boundIndices) {
+			// (sizes were checked against the buffers when the mesh was registered: SceneStore::Apply)
+			const SceneMesh& mesh = *item.mesh;
+			const D3D12_INDEX_BUFFER_VIEW ib = lodDraw ? item.lods->view
+				: D3D12_INDEX_BUFFER_VIEW{indices, mesh.desc.indexCount * mesh.desc.indexStride, mesh.desc.indexStride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
+			list->IASetIndexBuffer(&ib);
+			boundIndices = indices;
 		}
 		if (batch.table != boundTable && batch.table != UINT32_MAX) {
 			list->SetGraphicsRootDescriptorTable(7, gpu.SrvGpu(batch.table));
@@ -2022,9 +2128,11 @@ void SceneRenderer::DrawItems(RenderGraph::PassContext& ctx, const std::vector<D
 		const uint32_t constants[4] = {batch.start, item.materialIndex, uint32_t(std::max(cascade, 0)), (item.mirrored ? 1u : 0u) | (opaqueKind == kForward || opaqueKind == kForwardProbe ? 0u : 2u)}; // bit 1: no screen space occlusion (blended passes)
 		list->SetGraphicsRoot32BitConstants(1, 4, constants, 0);
 		const AeSubMesh& sm = item.mesh->subMeshes[item.subMesh];
-		list->DrawIndexedInstanced(sm.indexCount, batch.count, sm.indexStart, INT(sm.baseVertex), 0);
+		const uint32_t indexCount = lodDraw ? item.lods->Count(batch.level, item.subMesh) : sm.indexCount;
+		const uint32_t indexStart = lodDraw ? item.lods->Start(batch.level, item.subMesh) : sm.indexStart;
+		list->DrawIndexedInstanced(indexCount, batch.count, indexStart, INT(sm.baseVertex), 0);
 		ctx.drawCalls++;
-		ctx.triangles += sm.indexCount / 3 * batch.count;
+		ctx.triangles += indexCount / 3 * batch.count;
 		itemsDrawn_ += batch.count;
 		itemsInstanced_ += batch.count > 1 ? batch.count : 0;
 		batch.first = nullptr;
@@ -2057,8 +2165,9 @@ void SceneRenderer::DrawItems(RenderGraph::PassContext& ctx, const std::vector<D
 		}
 		// a missing material, or one whose table could not be made yet, samples the default textures
 		const uint32_t table = item.material && item.material->table != UINT32_MAX ? item.material->table : fallbackTable_;
+		const uint32_t level = levelOf(item);
 		const bool joins = batch.first && batch.pso == pso && batch.table == table && batch.first->mesh == item.mesh && batch.first->subMesh == item.subMesh &&
-			batch.first->materialIndex == item.materialIndex && batch.first->mirrored == item.mirrored;
+			batch.first->materialIndex == item.materialIndex && batch.first->mirrored == item.mirrored && batch.level == level;
 		if (joins) {
 			++batch.count;
 		} else {
@@ -2068,6 +2177,7 @@ void SceneRenderer::DrawItems(RenderGraph::PassContext& ctx, const std::vector<D
 			batch.table = table;
 			batch.start = instanceMapUsed_;
 			batch.count = 1;
+			batch.level = level;
 		}
 		instanceMap_[instanceMapUsed_++] = item.instanceIndex;
 	}
@@ -2231,10 +2341,15 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	// built (the same walk over the instances) and built after it
 	const bool pathTraceWanted = settings.pathTracing == "always" || (settings.pathTracing == "freeCamera" && Overlay::Get().FreeCamera());
 	raysWanted_ = settings.rayTracedReflections || settings.probeGi || settings.rayTracedLighting || settings.radianceCascades || settings.debugView == "bvh" || pathTraceWanted;
+	// ---- automatic levels of detail: the levels that arrived go to the GPU (before anything is drawn)
+	MeshLods::Get().BeginFrame(device_, list, retireFence);
+	autoLod_ = settings.autoLod;
+	lodPixelError_ = 2.0f / std::max(settings.lodBias, 0.1f);
 	SceneBvh::Get().SetPoseBudget(uint32_t(std::clamp(settings.skinnedRayUpdates, 0.0f, 64.0f) + 0.5f));
 	SceneBvh::Get().BeginFrame(device_, list, retireFence, frame);
 	SceneBvh::Get().BeginInstances();
 	raysWanted_ = raysWanted_ && SceneBvh::Get().HasGeometry() && raysSupported_;
+	naturalTiling_ = settings.naturalTiling;
 	BuildDrawLists(scene, frame);
 	bvhReady_ = raysWanted_ && SceneBvh::Get().EndInstances(device_, list, retireFence);
 	pathTrace_ = pathTraceWanted && bvhReady_;
@@ -2456,15 +2571,21 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		GpuTexture* atlas = ctx.Texture(shadow);
 		D3D12_CPU_DESCRIPTOR_HANDLE dsv = gpu.DsvCpu(atlas->target);
 		ctx.list->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
-		ctx.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 		BindCommon(ctx.list, false);
+		uint32_t drawn = 0;
 		for (size_t i = 0; i < cascades_.size(); ++i) {
+			if (i < cascadeDraw_.size() && !cascadeDraw_[i]) {
+				continue; // (kept from the frame it was drawn in: shadowCaching)
+			}
 			const D3D12_VIEWPORT& vp = cascades_[i].viewport;
 			const D3D12_RECT rect = {LONG(vp.TopLeftX), LONG(vp.TopLeftY), LONG(vp.TopLeftX + vp.Width), LONG(vp.TopLeftY + vp.Height)};
+			ctx.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 1, &rect);
 			ctx.list->RSSetViewports(1, &vp);
 			ctx.list->RSSetScissorRects(1, &rect);
 			DrawItems(ctx, casters_, kShadow, kShadowAlpha, int(i));
+			++drawn;
 		}
+		ctx.note = Format("%u of %zu cascades drawn this frame", drawn, cascades_.size());
 	});
 	GpuTextureDesc guideDesc = colorDesc;
 	guideDesc.format = guideDesc.targetFormat = kGuideNormalFormat;
@@ -2840,6 +2961,12 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		BindCommon(ctx.list, true);
 		DrawItems(ctx, opaque_, kForward, kForward, -1);
 		ctx.note = Format("%u punctual lights in %ux%ux%u clusters", punctualCount_, kClusterX, kClusterY, kClusterZ);
+		if (autoLod_ && lodFullTriangles_ > 0) {
+			const uint64_t drawn = lodTriangles_[0] + lodTriangles_[1] + lodTriangles_[2] + lodTriangles_[3];
+			ctx.note += Format("; auto LOD (camera's view): %llu of %llu triangles (%.0f %%), instances per level %u / %u / %u / %u, %u without levels",
+				(unsigned long long)drawn, (unsigned long long)lodFullTriangles_, 100.0 * double(drawn) / double(lodFullTriangles_),
+				lodInstances_[0], lodInstances_[1], lodInstances_[2], lodInstances_[3], lodInstancesWithout_);
+		}
 	});
 	// ---- screen space reflections: what a smooth surface mirrors, where that is on screen. Read from the picture of the
 	// frame before (the temporal history, as the host does it), added on top of the sky / probe reflection the
@@ -3613,6 +3740,11 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		{"drawCalls", draws},
 		{"instancing", {{"instancesDrawn", itemsDrawn_}, {"inInstancedDraws", itemsInstanced_}, {"drawCallsSaved", itemsDrawn_ > draws ? itemsDrawn_ - draws : 0}}},
 		{"triangles", triangles},
+		{"autoLod", {{"enabled", autoLod_}, {"pixelError", lodPixelError_},
+			{"cameraView", {{"instancesPerLevel", {lodInstances_[0], lodInstances_[1], lodInstances_[2], lodInstances_[3]}}, {"instancesWithoutLevels", lodInstancesWithout_},
+				{"trianglesPerLevel", {lodTriangles_[0], lodTriangles_[1], lodTriangles_[2], lodTriangles_[3]}},
+				{"trianglesInFull", lodFullTriangles_}, {"trianglesDrawn", lodTriangles_[0] + lodTriangles_[1] + lodTriangles_[2] + lodTriangles_[3]}}},
+			{"meshes", MeshLods::Get().Stats()}}},
 		{"pipelineStates", pipelines_.size() + fullscreenPipelines_.size()},
 		{"lights", {{"directional", hasSun_ ? 1 : 0}, {"punctual", punctualCount_}, {"clusters", kClusterX * kClusterY * kClusterZ}, {"clustersWithLights", usedClusters},
 			{"maxLightsInACluster", maxPerCluster}, {"lightIndexEntries", lightIndices_.size()}, {"clusterGrid", {kClusterX, kClusterY, kClusterZ}}}},
@@ -3712,6 +3844,7 @@ void SceneRenderer::Release(bool leak) {
 	}
 	probeCameraValid_ = false;
 	SceneBvh::Get().Release(leak);
+	MeshLods::Get().Release(leak);
 	bvhReady_ = false;
 	nrdFrame_ = false;
 	rtLighting_ = false;

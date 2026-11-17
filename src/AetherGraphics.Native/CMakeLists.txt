@@ -30,6 +30,12 @@ target_compile_definitions(aether_imgui PUBLIC
 	IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
 	IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS)
 
+# meshoptimizer v1.3 (MIT): only its simplifier, for the automatic levels of detail (Renderer/MeshLod.cpp)
+set(MESHOPT_DIR "${AETHER_THIRD_PARTY}/meshoptimizer/src")
+add_library(aether_meshopt STATIC ${MESHOPT_DIR}/simplifier.cpp ${MESHOPT_DIR}/allocator.cpp)
+target_include_directories(aether_meshopt PUBLIC ${MESHOPT_DIR})
+target_compile_options(aether_meshopt PRIVATE /W3 /utf-8)
+
 add_library(aether_core STATIC
 	Core/Log.cpp
 	Core/Config.cpp
@@ -41,6 +47,7 @@ add_library(aether_core STATIC
 	Renderer/GpuTimer.cpp
 	Renderer/SceneRenderer.cpp
 	Renderer/Bvh.cpp
+	Renderer/MeshLod.cpp
 	Renderer/ReflectionDenoiser.cpp
 	Renderer/NrdInstance.cpp
 	Renderer/LightingDenoiser.cpp
@@ -58,7 +65,7 @@ target_include_directories(aether_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${AETH
 target_compile_definitions(aether_core PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 # /EHa: structured exceptions unwind C++ frames (Session.cpp guards the frame entry points)
 target_compile_options(aether_core PUBLIC /W4 /EHa /permissive- /utf-8 /wd4100 /wd4324)
-target_link_libraries(aether_core PUBLIC aether_imgui d3d12 dxgi dxguid d3dcompiler windowscodecs ole32 user32 gdi32 dwmapi advapi32)
+target_link_libraries(aether_core PUBLIC aether_imgui aether_meshopt d3d12 dxgi dxguid d3dcompiler windowscodecs ole32 user32 gdi32 dwmapi advapi32)
 
 # NRD (NVIDIA Real-time Denoisers, v4.18.0): the reflection denoiser. Under the NVIDIA RTX SDKs License, which allows
 # it only in object code: it is not committed, scripts\fetch-deps.ps1 puts it (and MathLib, ShaderMake) in build\deps.

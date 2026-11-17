@@ -8,7 +8,7 @@
 namespace aether {
 
 static const std::vector<std::string> kQualities = {"low", "medium", "high", "ultra"};
-static const std::vector<std::string> kFeatures = {"testTriangle", "gpuTiming", "shadows", "sky", "ssao", "antialiasing", "bloom", "motionBlur", "ssr", "particles", "volumetricFog", "indirectLight", "reflectionProbe", "rayTracedReflections", "followSceneNight", "probeGi", "lensFlare", "rayTracedLighting", "rayTracedGi", "radianceCascades", "lampShadows"};
+static const std::vector<std::string> kFeatures = {"testTriangle", "gpuTiming", "shadows", "sky", "ssao", "antialiasing", "bloom", "motionBlur", "ssr", "particles", "volumetricFog", "indirectLight", "reflectionProbe", "rayTracedReflections", "followSceneNight", "probeGi", "lensFlare", "rayTracedLighting", "rayTracedGi", "radianceCascades", "lampShadows", "naturalTiling", "shadowCaching", "autoLod"};
 static const std::vector<std::string> kRenderModes = {"hdrp", "aether", "compare", "standalone"};
 static const std::vector<std::string> kSkyModes = {"physical", "scene"};
 static const std::vector<std::string> kPathTracingModes = {"off", "freeCamera", "always"};
@@ -66,6 +66,8 @@ static json ToJsonData(const SettingsData& d) {
 		{"lensFlare", d.lensFlare},
 		{"rayTracedLighting", d.rayTracedLighting},
 		{"lampShadows", d.lampShadows},
+		{"naturalTiling", d.naturalTiling},
+		{"shadowCaching", d.shadowCaching},
 		{"rayTracedGi", d.rayTracedGi},
 		{"radianceCascades", d.radianceCascades},
 		{"followSceneNight", d.followSceneNight},
@@ -97,6 +99,7 @@ static json ToJsonData(const SettingsData& d) {
 		{"lensFlareStrength", d.lensFlareStrength},
 		{"smokeOpacity", d.smokeOpacity},
 		{"lodBias", d.lodBias},
+		{"autoLod", d.autoLod},
 		{"anisotropicLevel", d.anisotropicLevel},
 		{"vsync", d.vsync},
 		{"logLevel", d.logLevel},
@@ -137,6 +140,8 @@ json Settings::Schema() {
 		{"followSceneNight", {{"type", "boolean"}, {"description", "The physical sky turns to night (about midnight, moon up) while the game's own day / night switch is on night"}}},
 		{"lensFlare", {{"type", "boolean"}, {"description", "Lens flare: ghosts, a halo and rays from the sun and from bright lamps"}}},
 		{"rayTracedLighting", {{"type", "boolean"}, {"description", "The sun's shadow and the ambient occlusion (with the light bounced off nearby surfaces) from rays, denoised by NVIDIA NRD (SIGMA, REBLUR); off: the shadow map and screen space occlusion. Needs DXR 1.1"}}},
+		{"shadowCaching", {{"type", "boolean"}, {"description", "The far sun shadow cascades are drawn in turns (the third every 2nd frame, the fourth every 4th) and kept in between; all again when the sun turns or the camera moves far"}}},
+		{"naturalTiling", {{"type", "boolean"}, {"description", "Large static surfaces (ground, roads, slopes, walls) sample their textures with hex tiling (three offset, turned copies blended) and a slow brightness variation, so no repeat pattern shows"}}},
 		{"lampShadows", {{"type", "boolean"}, {"description", "Lamps and head lamps that cast shadows are shadowed by rays (up to four per pixel, soft by a 5 cm bulb). Needs DXR 1.1"}}},
 		{"rayTracedGi", {{"type", "boolean"}, {"description", "The opaque surfaces' ambient light per pixel from rays up to 60 m (the sky where they get out, the lit surface where they meet one), denoised with the occlusion (NRD REBLUR), instead of the cascades or the probes. Needs rayTracedLighting"}}},
 		{"radianceCascades", {{"type", "boolean"}, {"description", "The indirect light everywhere (the picture, what rays meet, glass, smoke, the reflection probes) from radiance cascades: five levels of probes round the camera over 96 x 32 x 96 m, merged into the light from every distance; no edge where the sky takes over. Replaces probeGi. Needs DXR 1.1"}}},
@@ -165,6 +170,7 @@ json Settings::Schema() {
 		{"bloomStrength", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 2.0}, {"description", "Bloom strength, as a factor on what the scene asks for"}}},
 		{"smokeOpacity", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 2.0}, {"description", "Tyre smoke opacity factor"}}},
 		{"lodBias", {{"type", "number"}, {"minimum", 0.3}, {"maximum", 8.0}, {"description", "Unity's LOD bias: higher keeps detailed models up to a greater distance"}}},
+		{"autoLod", {{"type", "boolean"}, {"description", "Automatic levels of detail: static meshes (600 triangles or more) get simplified versions at about 50, 25 and 10 % of their triangles; an instance is drawn with the coarsest whose error covers at most 2 / lodBias pixels (shadow cascades: half a shadow texel)"}}},
 		{"anisotropicLevel", {{"type", "integer"}, {"minimum", 1}, {"maximum", 16}, {"description", "Anisotropic texture filtering level"}}},
 		{"vsync", {{"type", "integer"}, {"minimum", 0}, {"maximum", 2}, {"description", "Vertical sync: 0 off, 1 every refresh, 2 every second refresh"}}},
 		{"autoExposure", oneOf({"scene", "always"}, "scene: the exposure as the scene sets it (fixed or automatic). always: scenes with a fixed exposure are metered too, within 2.5 stops of their own value, adapting as eyes do")},
@@ -270,6 +276,8 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 	if (key == "lensFlare") return wantBool(d.lensFlare);
 	if (key == "rayTracedLighting") return wantBool(d.rayTracedLighting);
 	if (key == "lampShadows") return wantBool(d.lampShadows);
+	if (key == "naturalTiling") return wantBool(d.naturalTiling);
+	if (key == "shadowCaching") return wantBool(d.shadowCaching);
 	if (key == "rayTracedGi") return wantBool(d.rayTracedGi);
 	if (key == "radianceCascades") return wantBool(d.radianceCascades);
 	if (key == "followSceneNight") return wantBool(d.followSceneNight);
@@ -387,6 +395,7 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 		d.lodBias = float(value.get<double>());
 		return {};
 	}
+	if (key == "autoLod") return wantBool(d.autoLod);
 	if (key == "anisotropicLevel") return wantInt(d.anisotropicLevel, 1, 16);
 	if (key == "vsync") return wantInt(d.vsync, 0, 2);
 	if (key == "vramBudgetMB") return wantInt(d.vramBudgetMB, 0, 65536);

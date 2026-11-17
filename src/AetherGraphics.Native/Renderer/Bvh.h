@@ -84,7 +84,8 @@ public:
 	void BeginFrame(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT64 fence, uint64_t frame);
 	void BeginInstances();
 	// False: the mesh is not there for rays (yet): its triangles never came (skinned meshes with skinnedRayUpdates = 0) or are not uploaded.
-	bool AddInstance(AeHandle mesh, const Mat4& world, uint32_t skipSubMeshes, uint32_t materialOffset, uint32_t doubleSided, bool mirrored);
+	// alphaTested: some of its sub meshes are alpha tested (leaves, fences): the shader tests their texture's alpha per triangle
+	bool AddInstance(AeHandle mesh, const Mat4& world, uint32_t skipSubMeshes, uint32_t materialOffset, uint32_t doubleSided, bool mirrored, bool alphaTested = false);
 	bool HasGeometry() const { return uploadedTris_ > 0; }
 	// Uploads this frame's instances and builds the structures: the bottom level ones this frame needs and has not
 	// got (or whose triangles changed), the top level one over the instances. False: nothing to trace this frame (no
@@ -110,6 +111,10 @@ private:
 		std::vector<float> uvs; // two per vertex (empty: none)
 		std::vector<uint32_t> indices;
 		std::vector<uint32_t> triSubMesh;
+		// (for the automatic levels of detail, MeshLod.h: the sub meshes as sent, the index format, the submission's number)
+		std::vector<AeSubMesh> subMeshes;
+		uint32_t indexStride = 0;
+		uint64_t serial = 0;
 	};
 	struct Built { uint64_t generation = 0; AeHandle mesh = 0; bool refit = false; std::vector<BvhTri> tris; double ms = 0; bool changing = false; std::vector<uint32_t> triVertices; uint32_t vertexCount = 0; };
 	// what the worker keeps of a changing mesh: which vertices each triangle uses
@@ -143,6 +148,7 @@ private:
 	std::thread worker_;
 	bool stop_ = false;
 	std::atomic<uint64_t> generation_{1};
+	uint64_t serial_ = 0; // (main thread: numbers the meshes submitted, MeshLods::Forget)
 	std::atomic<uint32_t> pendingJobs_{0};
 	std::atomic<uint32_t> refused_{0};
 	std::atomic<uint64_t> refits_{0};
@@ -166,6 +172,8 @@ private:
 	std::vector<TlasInstance> instances_;
 	std::vector<Mat4> instanceWorld_;
 	std::vector<AeHandle> instanceMesh_; // (the mesh it uses, aliases resolved)
+	std::vector<uint8_t> instanceAlpha_; // (1: some of its sub meshes are alpha tested)
+	uint32_t opaqueInstances_ = 0;       // last top level build: instances the hardware decides alone (no shader per triangle)
 	// render thread: meshes whose pose is taken on the GPU
 	struct GpuPose {
 		bool layout = false;                      // SetPoseLayout came

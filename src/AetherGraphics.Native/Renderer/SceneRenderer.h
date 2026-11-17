@@ -19,6 +19,8 @@
 
 namespace aether {
 
+struct MeshLodSet; // MeshLod.h
+
 class SceneRenderer {
 public:
 	static SceneRenderer& Get();
@@ -65,6 +67,11 @@ private:
 		float radius;
 		bool castsShadow;
 		bool mirrored;
+		// automatic level of detail (MeshLod.h): the mesh's levels (null: none), the level picked for the camera, and
+		// the instance's scale (the levels' errors are in the mesh's own units)
+		const MeshLodSet* lods = nullptr;
+		uint32_t lod = 0;
+		float lodScale = 1.0f;
 	};
 	struct Cascade { Mat4 viewProj; Mat4 atlasMatrix; float splitFar; float texelWorld; Vec3 center; float radius; D3D12_VIEWPORT viewport; };
 
@@ -89,6 +96,13 @@ private:
 	// reconstruct positions with
 	Mat4 nrdView_ = Mat4::Identity(), nrdProj_ = Mat4::Identity(), nrdViewPrev_ = Mat4::Identity(), nrdProjPrev_ = Mat4::Identity(), invViewProj_ = Mat4::Identity();
 	bool rtGi_ = false;      // this frame: the ambient light per pixel from long rays (setting rayTracedGi; the probe grid stops)
+	// shadow cascades drawn in turns (setting shadowCaching): what was drawn last, and which are drawn this frame
+	std::vector<Cascade> shadowCache_;
+	std::vector<bool> cascadeDraw_;
+	Vec3 cachedSunDirection_ = {0, 0, 0};
+	uint32_t cachedCascadeSize_ = 0;
+	const void* cachedAtlas_ = nullptr;
+	bool naturalTiling_ = false; // this frame: large static meshes get hex tiling (setting naturalTiling)
 	bool lampShadows_ = false; // this frame: lamps that cast shadows are shadowed by rays (setting lampShadows)
 	bool rtLighting_ = false; // this frame: the sun's shadow and the ambient occlusion from rays (setting rayTracedLighting, LightingDenoiser)
 	bool nrdFrame_ = false; // this frame: the reflection rays sample the surface's lobe and NRD denoises them (setting reflectionDenoiser = nrd)
@@ -203,6 +217,13 @@ private:
 	uint32_t* instanceMap_ = nullptr;
 	uint32_t instanceMapUsed_ = 0, instanceMapCapacity_ = 0, itemsDrawn_ = 0, itemsInstanced_ = 0;
 	D3D12_GPU_VIRTUAL_ADDRESS instanceMapVa_ = 0;
+	// automatic levels of detail (setting autoLod, MeshLod.h): this frame's switch, the error a level may show (pixels,
+	// 2 / lodBias), and what the camera's view drew: instances and triangles per level, and the triangles the meshes
+	// in full would have had
+	bool autoLod_ = false;
+	float lodPixelError_ = 0.7f;
+	uint32_t lodInstances_[4] = {}, lodInstancesWithout_ = 0;
+	uint64_t lodTriangles_[4] = {}, lodFullTriangles_ = 0;
 	ID3D12PipelineState* FullscreenPipeline(FullscreenKind kind, DXGI_FORMAT format);
 	bool aoActive_ = false;
 	void BuildDrawLists(const SceneFrame& scene, uint64_t frame);

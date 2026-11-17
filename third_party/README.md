@@ -4,6 +4,7 @@
 |---|---|---|---|
 | [Dear ImGui](https://github.com/ocornut/imgui) | 1.93.0（無改変。本体と `backends/imgui_impl_dx12`、`imgui_impl_win32`） | MIT（`imgui/LICENSE.txt`） | ゲーム内オーバーレイ |
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0（`single_include` の `json.hpp`） | MIT（`nlohmann/LICENSE.MIT`） | ログ、設定、IPC の JSON |
+| [meshoptimizer](https://github.com/zeux/meshoptimizer) | 1.3（無改変。`src/simplifier.cpp`、`src/allocator.cpp`、`src/meshoptimizer.h` だけ） | MIT（`meshoptimizer/LICENSE.md`） | 自動 LOD（静的メッシュの簡略化した索引、`Renderer/MeshLod.cpp`） |
 | [Intel XeGTAO](https://github.com/GameTechDev/XeGTAO) | 主パスを HLSL へ移植（`shaders/scene_post.hlsl` の `PSAmbientOcclusion`。詳細は `XeGTAO/README.md`） | MIT（`XeGTAO/LICENSE`） | アンビエントオクルージョン |
 
 | [MathLib](https://github.com/NVIDIA-RTX/MathLib) | v11 の `ml.hlsli`（無改変、`shaders/ml.hlsli` として配置） | MIT（`MathLib/LICENSE.txt`） | 反射の光線の GGX ローブのサンプリング（VNDF） |
