@@ -374,6 +374,23 @@ namespace AetherGraphics {
 				uvProperty = MainTex;
 			}
 
+			if (cls == AeConst.ClassUnsupported) {
+				// A shader nothing above knows (a map maker's own Shader Graph): drawn as a plain surface with its main
+				// texture rather than the magenta "unsupported" checker. (sadamine's trees and slopes, 616 materials of one
+				// graph with a texture named "_main", were all checkered.) The texture: one whose name says it is the colour,
+				// else the first one bound. Alpha tested and double sided as the material's HDRP flags say; an alpha tested,
+				// double sided one is taken as foliage.
+				int main = MainTextureGuess(m);
+				if (main != 0) {
+					bool foliage = (flags & AeConst.MaterialAlphaTest) != 0 && (flags & AeConst.MaterialDoubleSided) != 0;
+					cls = foliage ? AeConst.ClassVegetation : AeConst.ClassStandard;
+					scratch_[AeConst.SlotBase] = m.GetTexture(main);
+					d.roughness = 0.8f;
+					d.alphaCutoff = Float(m, AlphaCutoff, 0.5f);
+					uvProperty = main;
+				}
+			}
+
 			if (cls != AeConst.ClassUnsupported && cls != AeConst.ClassSkip) {
 				if (transparent) {
 					flags |= AeConst.MaterialBlend;
@@ -425,5 +442,26 @@ namespace AetherGraphics {
 		}
 
 		private static readonly List<int> ids_ = new List<int>();
+		private static readonly string[] colourNames_ = { "main", "albedo", "basecolor", "base", "diffuse", "color", "colour", "tex" };
+
+		/// <summary>An unknown shader's colour texture: the property whose name says so (in that order of preference), else
+		/// the first 2D texture bound. 0: none.</summary>
+		private static int MainTextureGuess(Material m) {
+			string[] names = m.GetTexturePropertyNames();
+			foreach (string want in colourNames_) {
+				foreach (string n in names) {
+					if (n.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0 && n.IndexOf("normal", StringComparison.OrdinalIgnoreCase) < 0 && n.IndexOf("mask", StringComparison.OrdinalIgnoreCase) < 0 &&
+						m.GetTexture(n) is Texture2D) {
+						return Shader.PropertyToID(n);
+					}
+				}
+			}
+			foreach (string n in names) {
+				if (m.GetTexture(n) is Texture2D && n.IndexOf("normal", StringComparison.OrdinalIgnoreCase) < 0 && !n.StartsWith("unity_", StringComparison.Ordinal)) {
+					return Shader.PropertyToID(n);
+				}
+			}
+			return 0;
+		}
 	}
 }
