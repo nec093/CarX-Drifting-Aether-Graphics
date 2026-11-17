@@ -57,6 +57,11 @@ cbuffer FrameConstants : register(b0) {
 	float4 g_GiParams;           // x metres between probes on the ground, y in height, z a different number every frame, w number of punctual lights
 	float4 g_RayParams;          // x 1 = rays this frame (the structures are bound), y 1 = g_SunShadowMask holds the sun's visibility for the opaque pass, z tan of the sun's angular radius, w 1 = g_SunShadowUntraced holds the casters the rays cannot find
 	float4 g_Upscale;            // x the material textures' mip bias (DLSS: log2(render / output) - 1), yz render size / output size, w 1 = DLSS resolves this frame
+	// the environment (SceneRenderer::UpdateEnvironment): one wind and one weather everything reads
+	float4 g_Wind;               // xy the way the wind blows (unit, world xz), z its speed (m/s, 10 m above the ground), w gustiness 0 .. 1
+	float4 g_WindTime;           // x the wind's clock (s), y the frame's step (s: the sway of the frame before, for the motion vectors), z 1 = plants sway, w the rain's clock (s, wraps every 64 s)
+	float4 g_Weather;            // x how wet the ground is 0 .. 1, y puddles 0 .. 1, z how hard it rains now 0 .. 1, w how much a thick cloud deck darkens the clouds' light 0 .. 1
+	float4 g_WeatherFog;         // x fog density the weather adds (per m), y 1 / its scale height (per m), z its base height (m)
 };
 
 cbuffer DrawConstants : register(b1) {
@@ -71,8 +76,10 @@ struct InstanceData {
 	float4 normalRow0; // rows of the inverse transpose of the world's upper 3x3; w of row0 = handedness (-1 for mirrored)
 	float4 normalRow1;
 	float4 normalRow2;
-	float4 layers; // x: Renderer.renderingLayerMask as uint bits (asuint), y: 1 = moved since the frame before, z: 1 = natural tiling
+	float4 layers; // x: Renderer.renderingLayerMask as uint bits (asuint), y: 1 = moved since the frame before, z: 1 = natural tiling, w: 1 = a plant (it has leaves: all of it sways)
 	float4x4 prevWorld; // the world matrix of the frame before
+	// (normalRow1.w: the mesh's lowest point in its own space, normalRow2.w: its height there (0: a mesh larger than a
+	// big tree), for the wind's sway)
 };
 
 struct MaterialData {

@@ -313,7 +313,7 @@ json HandleRequest(const json& request) {
 	}
 	if (method == "set_graphics_option") {
 		// one of Aether's own graphics options (the same ones the overlay's Settings tab shows)
-		static const char* const kOptions[] = {"skyMode", "timeOfDay", "sunHeading", "cloudCoverage", "cloudSpeed", "shadowSoftness", "indirectStrength", "fogStrength", "moonlight", "skinnedRayUpdates", "motionBlurStrength", "bloomStrength", "aoStrength", "aoRadius", "lensFlareStrength", "smokeOpacity", "lodBias", "anisotropicLevel", "vsync", "exposureEV", "tonemap", "hostGrading", "reflectionDenoiser", "upscaler", "pathTracing", "pathTracingBounces", "pathTracingMaxSamples", "pathTracingDenoiser", "pathTracingSamplesPerFrame", "freeCameraSpeed", "freeCameraSensitivity"};
+		static const char* const kOptions[] = {"skyMode", "timeOfDay", "sunHeading", "cloudCoverage", "cloudSpeed", "dayOfYear", "latitude", "timeFlow", "windSpeed", "windDirection", "gustiness", "weather", "rainIntensity", "shadowSoftness", "indirectStrength", "fogStrength", "moonlight", "skinnedRayUpdates", "motionBlurStrength", "bloomStrength", "aoStrength", "aoRadius", "lensFlareStrength", "smokeOpacity", "lodBias", "anisotropicLevel", "vsync", "exposureEV", "tonemap", "hostGrading", "reflectionDenoiser", "upscaler", "pathTracing", "pathTracingBounces", "pathTracingMaxSamples", "pathTracingDenoiser", "pathTracingSamplesPerFrame", "freeCameraSpeed", "freeCameraSensitivity"};
 		std::string option;
 		if (!GetString(params, "option", "", option, error)) {
 			return Fail(id, error);

@@ -106,9 +106,10 @@ inline float Opacity(const SmokePuff& p) {
 
 // The air at a place: the wind, and what the cars do to the air round them. `mixing`: how hard the air is stirred
 // there (0 still air .. 1 the middle of a wake).
-V3 Air(V3 p, float ground, float seed, float time, V3 wind, const SmokeBody* bodies, int bodyCount, float& mixing) {
-	// the wind in gusts, less of it near the ground
-	const float gust = 1.0f + 0.45f * std::sin(time * 0.37f + p.x * 0.04f) + 0.25f * std::sin(time * 1.13f + p.z * 0.07f);
+V3 Air(V3 p, float ground, float seed, float time, V3 wind, float gustiness, const SmokeBody* bodies, int bodyCount, float& mixing) {
+	// the wind in gusts (as strong as the setting gustiness says: 0.4 is the gusts this had before it), less of it near the ground
+	const float g = gustiness / 0.4f;
+	const float gust = std::max(1.0f + g * (0.45f * std::sin(time * 0.37f + p.x * 0.04f) + 0.25f * std::sin(time * 1.13f + p.z * 0.07f)), 0.0f);
 	const float height = Clamp01((p.y - ground) / 2.5f);
 	V3 air = wind * (gust * (0.3f + 0.7f * height));
 	mixing = 0;
@@ -251,7 +252,12 @@ AETHER_API int Aether_SmokeStep(void* puffData, int count, const void* wheelData
 	if (!puffs || count <= 0 || !wind) {
 		return 0;
 	}
-	const V3 windVector = {wind[0], wind[1], wind[2]};
+	// The wind is Aether's environment's (settings windSpeed, windDirection, gustiness: the same wind as the plants and
+	// the clouds), near the ground; the managed side's own breeze in `wind` is no longer used.
+	(void)wind;
+	const aether::Vec3 envWind = aether::SceneRenderer::Get().GroundWind();
+	const V3 windVector = {envWind.x, envWind.y, envWind.z};
+	const float gustiness = aether::SceneRenderer::Get().Gustiness();
 	const float follow = 1.0f - std::exp(-2.2f * dt); // (smoke weighs next to nothing: it takes the air's speed in half a second)
 	for (int i = 0; i < count;) {
 		SmokePuff& p = puffs[i];
@@ -286,7 +292,7 @@ AETHER_API int Aether_SmokeStep(void* puffData, int count, const void* wheelData
 				}
 			}
 		} else {
-			const V3 air = Air(p.position, p.ground, p.seed, time, windVector, bodies, bodies ? bodyCount : 0, mixing);
+			const V3 air = Air(p.position, p.ground, p.seed, time, windVector, gustiness, bodies, bodies ? bodyCount : 0, mixing);
 			p.velocity = p.velocity + (air - p.velocity) * follow;
 			p.velocity.y += (0.15f + 0.8f * p.heat) * std::exp(-p.age * 0.5f) * dt; // (hot smoke rises, for as long as it is hot)
 			p.position = p.position + p.velocity * dt;

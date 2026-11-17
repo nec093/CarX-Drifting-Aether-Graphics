@@ -42,6 +42,14 @@ public:
 
 	// ---- any thread
 	json Stats();
+	float CurrentHours() const { return currentHours_.load(); } // the time of day the sky is drawn at (any thread)
+	int CurrentDay() const { return currentDay_.load(); }
+	// the environment as the last frame had it (any thread): how wet the ground is (0 .. 1) and the puddles on it, and
+	// the wind near the ground (m/s, the way it blows; the tyre smoke drifts with it) and its gustiness
+	float Wetness() const { return wetnessShown_.load(); }
+	float Puddles() const { return puddlesShown_.load(); }
+	Vec3 GroundWind() const { return {groundWind_[0].load(), groundWind_[1].load(), groundWind_[2].load()}; }
+	float Gustiness() const { return gustShown_.load(); }
 	void SetSceneNight(bool night) { sceneNight_.store(night); }
 	// (towards the sun or the moon, as the last frame had it; read without a lock: a torn read is three old or new floats)
 	Vec3 SunDirection() const { return sunDirection_; }
@@ -80,7 +88,7 @@ private:
 	void UploadDefaults(ID3D12GraphicsCommandList* list);
 	ID3D12PipelineState* Pipeline(uint32_t layoutId, PassKind kind, uint32_t cull);
 	// full screen passes: one pixel shader each (scene_post.hlsl), named in kFullscreenEntry (SceneRenderer.cpp)
-	enum FullscreenKind { kFullscreenSky = 0, kFullscreenComposite, kFullscreenAo, kFullscreenAoBlur, kFullscreenExposure, kFullscreenIrradiance, kFullscreenTaa, kFullscreenMotionBlur, kFullscreenBloomDown, kFullscreenBloomUp, kFullscreenSsr, kFullscreenTransmittanceLut, kFullscreenMultiScatterLut, kFullscreenSkyView, kFullscreenCloudNoise, kFullscreenSkyClouds, kFullscreenClouds, kFullscreenFog, kFullscreenFogApply, kFullscreenReflectionBlur, kFullscreenBvhDebug, kFullscreenRayTrace, kFullscreenGiRays, kFullscreenGiIrradiance, kFullscreenGiDepth, kFullscreenLensFlare, kFullscreenSmokeApply, kFullscreenSunRays, kFullscreenAoRays, kFullscreenRcTrace, kFullscreenRcIrradiance, kFullscreenRcDepth, kFullscreenPathTrace, kFullscreenPathTraceApply, kFullscreenDlssMotion, kFullscreenPathTraceRr, kFullscreenKindCount };
+	enum FullscreenKind { kFullscreenSky = 0, kFullscreenComposite, kFullscreenAo, kFullscreenAoBlur, kFullscreenExposure, kFullscreenIrradiance, kFullscreenTaa, kFullscreenMotionBlur, kFullscreenBloomDown, kFullscreenBloomUp, kFullscreenSsr, kFullscreenTransmittanceLut, kFullscreenMultiScatterLut, kFullscreenSkyView, kFullscreenCloudNoise, kFullscreenSkyClouds, kFullscreenClouds, kFullscreenFog, kFullscreenFogApply, kFullscreenReflectionBlur, kFullscreenBvhDebug, kFullscreenRayTrace, kFullscreenGiRays, kFullscreenGiIrradiance, kFullscreenGiDepth, kFullscreenLensFlare, kFullscreenSmokeApply, kFullscreenSunRays, kFullscreenAoRays, kFullscreenRcTrace, kFullscreenRcIrradiance, kFullscreenRcDepth, kFullscreenPathTrace, kFullscreenPathTraceApply, kFullscreenDlssMotion, kFullscreenPathTraceRr, kFullscreenRain, kFullscreenKindCount };
 	// draws a full screen pass into `output` (its whole size) with up to three inputs; `params` reach the shader as g_PassParams
 	bool Fullscreen(RenderGraph::PassContext& ctx, FullscreenKind kind, GpuTexture* output, GpuTexture* in0, GpuTexture* in1 = nullptr, GpuTexture* in2 = nullptr, const float* params = nullptr, GpuTexture* in3 = nullptr);
 	// The same with several render targets (the pipeline is made for their formats, in order; no blending).
@@ -204,8 +212,40 @@ private:
 	std::vector<uint32_t> rayMaterials_; // per ray instance and sub mesh, two numbers: its index in this frame's material buffer, its base texture's place in the SRV heap (UINT32_MAX: none)
 	D3D12_GPU_VIRTUAL_ADDRESS rayMaterialsVa_ = 0;
 	bool indirect_ = false;      // this frame: the occlusion pass also gathers light bounced off what it finds
-	std::chrono::steady_clock::time_point cloudClock_ = std::chrono::steady_clock::now();
-	float cloudDrift_ = 0.0f;
+	float cloudDrift_ = 0.0f, cloudDriftZ_ = 0.0f; // how far the wind has carried the clouds (noise uv, x and z)
+	// the time of day as it flows (setting timeFlow): hours moved on since timeOfDay last changed
+	std::chrono::steady_clock::time_point timeClock_ = std::chrono::steady_clock::now();
+	float timeFlowHours_ = 0.0f, timeFlowFrom_ = -1.0f;
+	std::atomic<float> currentHours_{12.0f};
+	std::atomic<int> currentDay_{172};
+	// The environment (docs/architecture/rendering-features.md, "風" and "天気"): one wind and one weather, eased from the
+	// settings every frame (UpdateEnvironment), that the clouds, the plants, the smoke, the fog, the ground and the rain
+	// all read. The weather's parts ease towards the chosen weather's numbers over about 20 s; the ground gets wet in a
+	// minute or two of rain and dries over about ten minutes after it.
+	struct Environment {
+		float windSpeed = 3.0f;          // m/s (10 m above the ground), eased towards the setting
+		float windX = 0.0f, windZ = 1.0f; // the way the wind blows (unit, world xz)
+		float gust = 0.4f;
+		double windTime = 0.0;           // s: the sway's and the gusts' clock (wraps every 4096 s)
+		float dt = 0.0f;                 // the frame's step (s), for the sway of the frame before (motion vectors)
+		float coverage = 0.0f;           // the weather's cloud coverage (the setting stays a minimum)
+		float fogExtra = 0.0f;           // per metre: fog the weather adds to the air's haze or the scene's fog
+		float fogShare = 0.0f;           // 0 .. 1: how much of the fog is the weather's low fog (a lower scale height)
+		float gloom = 0.0f;              // 0 .. 1: how much a thick deck darkens the clouds' light (overcast, rain)
+		float rain = 0.0f;               // 0 .. 1: how hard it rains now (eased in and out with the weather)
+		float wetness = 0.0f;            // 0 .. 1: the ground
+		float puddles = 0.0f;            // 0 .. 1: how much of the level ground stands under water
+		float blend = 1.0f;              // 0 .. 1: how far the transition to the chosen weather has gone (stats)
+		std::string weather = "clear";   // the weather the state eases towards
+		std::string from = "clear";      // ... and the one it came from
+	};
+	Environment env_;
+	std::chrono::steady_clock::time_point envClock_ = std::chrono::steady_clock::now();
+	bool envStarted_ = false;
+	std::atomic<float> wetnessShown_{0.0f}, puddlesShown_{0.0f}, gustShown_{0.4f};
+	std::atomic<float> groundWind_[3] = {0.0f, 0.0f, 0.0f};
+	void UpdateEnvironment(const SettingsData& settings);
+	bool rain_ = false; // this frame: the rain pass draws streaks
 	// automatic exposure: the value of the frame before (1 x 1), which this frame's metering moves from
 	std::shared_ptr<GpuTexture> exposureHistory_[2];
 	uint32_t exposureIndex_ = 0;
@@ -222,6 +262,7 @@ private:
 	// in full would have had
 	bool autoLod_ = false;
 	float lodPixelError_ = 0.7f;
+	float lodMinDistance_ = 25.0f; // m: the nearest the first simpler level may be used (doubling per level)
 	uint32_t lodInstances_[4] = {}, lodInstancesWithout_ = 0;
 	uint64_t lodTriangles_[4] = {}, lodFullTriangles_ = 0;
 	ID3D12PipelineState* FullscreenPipeline(FullscreenKind kind, DXGI_FORMAT format);

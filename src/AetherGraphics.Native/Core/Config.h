@@ -60,8 +60,17 @@ struct SettingsData {
 	std::string skyMode = "physical"; // physical: Aether's atmosphere, lit by the sun at timeOfDay | scene: the scene's own sky texture and sun
 	float timeOfDay = 14.0f;          // hours, 0 .. 24 (physical sky)
 	float sunHeading = 0.0f;          // degrees: turns the sun's path about the up axis (physical sky)
+	int dayOfYear = 0;                // 1 .. 365: the date the sun's path is for (0: today's date)
+	float latitude = 35.0f;           // -66 .. 66 degrees: where on the earth the map lies (the sun's height and path)
+	std::string timeFlow = "stopped"; // stopped | realtime | fast (one hour a minute): the time of day moves on from timeOfDay
 	float cloudCoverage = 0.4f;       // 0 .. 1: how much of the sky the clouds take (physical sky; 0 = none)
-	float cloudSpeed = 1.0f;          // 0 .. 4: how fast the clouds drift
+	float cloudSpeed = 1.0f;          // 0 .. 4: how fast the clouds drift, as a factor on the speed the wind gives them
+	// the environment (SceneRenderer::UpdateEnvironment): one wind and one weather that everything drawn reacts to
+	float windSpeed = 3.0f;           // 0 .. 25 m/s, 10 m above the ground
+	float windDirection = 225.0f;     // 0 .. 360 degrees: where the wind comes FROM, as weather reports say (0 from the map's north, 90 from the east)
+	float gustiness = 0.4f;           // 0 .. 1: how strong the gusts are
+	std::string weather = "clear";    // clear | cloudy | overcast | rain | fog: what the sky eases towards (over about 20 s)
+	float rainIntensity = 0.6f;       // 0 .. 1: how hard it rains when weather is rain
 	float shadowSoftness = 1.5f; // How far the sun's shadow edges are blurred, in shadow map texels (0 = hard)
 	float motionBlurStrength = 1.0f; // Motion blur strength, as a factor on what the scene asks for
 	float aoStrength = 1.0f;        // 0 .. 2: ambient occlusion (1: as measured; above: darker than measured)

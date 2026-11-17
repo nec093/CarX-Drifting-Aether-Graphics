@@ -153,6 +153,9 @@ float4 MarchClouds(float3 dir, float altitude, int steps, float jitter) {
 			break;
 		}
 	}
+	// a thick deck (overcast, rain: g_Weather.w) lets far less of the sun through to its underside than the few steps
+	// towards the sun find in a layer that has gaps: grey, dark undersides; the sky's light on the ground with them
+	light *= 1.0 - 0.8 * g_Weather.w;
 	// far clouds sink into the haze: towards the sky's own colour in that direction
 	float haze = 1.0 - exp(-t0 * 0.03);
 	float3 skyBehind = PhysicalSkyAir(dir);

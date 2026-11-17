@@ -1,3 +1,4 @@
+#include <ctime>
 #include "Bvh.h"
 #include "MeshLod.h"
 #include "Dlss.h"
@@ -36,7 +37,7 @@ const float kNaturalTilingRadius = 12.0f; // m: a mesh this large or larger is t
 const float kExposureDarkenRate = 0.8f;
 const uint32_t kPostTables = 64;     // 0..3: ambient occlusion, its blur, composite, exposure metering; the rest handed out per pass (Fullscreen)
 const uint32_t kIrradianceSize = 32;  // octahedral map of the sky's diffuse light
-const char* const kFullscreenEntry[] = {"PSSky", "PSComposite", "PSAmbientOcclusion", "PSAmbientOcclusionBlur", "PSExposure", "PSIrradiance", "PSTaa", "PSMotionBlur", "PSBloomDown", "PSBloomUp", "PSSsr", "PSTransmittanceLut", "PSMultiScatterLut", "PSSkyViewLut", "PSCloudNoise", "PSSkyCloudsLut", "PSClouds", "PSVolumetricFog", "PSVolumetricFogApply", "PSReflectionBlur", "PSBvhDebug", "PSRayTrace", "PSGiRays", "PSGiIrradiance", "PSGiDepth", "PSLensFlare", "PSSmokeApply", "PSSunRays", "PSAoRays", "PSRcTrace", "PSRcIrradiance", "PSRcDepth", "PSPathTrace", "PSPathTraceApply", "PSDlssMotion", "PSPathTraceRr"};
+const char* const kFullscreenEntry[] = {"PSSky", "PSComposite", "PSAmbientOcclusion", "PSAmbientOcclusionBlur", "PSExposure", "PSIrradiance", "PSTaa", "PSMotionBlur", "PSBloomDown", "PSBloomUp", "PSSsr", "PSTransmittanceLut", "PSMultiScatterLut", "PSSkyViewLut", "PSCloudNoise", "PSSkyCloudsLut", "PSClouds", "PSVolumetricFog", "PSVolumetricFogApply", "PSReflectionBlur", "PSBvhDebug", "PSRayTrace", "PSGiRays", "PSGiIrradiance", "PSGiDepth", "PSLensFlare", "PSSmokeApply", "PSSunRays", "PSAoRays", "PSRcTrace", "PSRcIrradiance", "PSRcDepth", "PSPathTrace", "PSPathTraceApply", "PSDlssMotion", "PSPathTraceRr", "PSRain"};
 // reflection probes: each is six square tiles (3 x 2: +X -X +Y | -Y +Z -Z); the atlas holds them 4 x 2
 const uint32_t kProbeFace = 128, kProbeBlurFace = 32;
 const float kProbeCell = 12.0f;      // the grid's spacing on the ground (m)
@@ -104,6 +105,11 @@ struct FrameConstants {
 	float giParams[4];           // x: metres between probes on the ground, y: in height, z: a different number every frame, w: number of punctual lights
 	float rayParams[4];          // x: 1 = rays this frame, y: 1 = the ray traced sun shadow is there for the opaque pass, z: tan of the sun's angular radius
 	float upscale[4];            // x: the material textures' mip bias (DLSS), yz: render size / output size, w: 1 = DLSS resolves this frame
+	// the environment (Environment in SceneRenderer.h)
+	float wind[4];               // xy: the way the wind blows (unit, world xz), z: its speed (m/s, 10 m up), w: gustiness 0 .. 1
+	float windTime[4];           // x: the wind's clock (s), y: the frame's step (s), z: 1 = plants sway, w: the rain's clock (s, wraps every 64 s)
+	float weather[4];            // x: wetness 0 .. 1, y: puddles 0 .. 1, z: rain now 0 .. 1, w: how much a thick deck darkens the clouds 0 .. 1
+	float weatherFog[4];         // x: fog density the weather adds (per m), y: 1 / its scale height (m), z: its base height (m)
 };
 
 // HDRP's "Custom" tone mapping is John Hable's piecewise filmic curve (toe, linear part, shoulder), with the parameters
@@ -183,7 +189,7 @@ void HableCurve(const float user[6], float curve[4], float segA[3][4], float seg
 struct InstanceData {
 	float world[16];
 	float normalRow0[4], normalRow1[4], normalRow2[4];
-	float reserved[4]; // x: rendering layers (as uint), y: 1 = moved since the frame before
+	float reserved[4]; // x: rendering layers (as uint), y: 1 = moved since the frame before, z: 1 = natural tiling, w: 1 = a plant (sways)
 	float prevWorld[16]; // the instance's world matrix of the frame before
 };
 
@@ -821,6 +827,21 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 			id.normalRow2[c] = inv.at(c, 2);
 		}
 		id.normalRow0[3] = mirrored ? -1.0f : 1.0f;
+		// for the wind's sway (scene_forward.hlsl, WindSway): the mesh's lowest point and its height in its own space,
+		// which the bend grows from. A mesh larger than a big tree (a static batch of many plants, a hedge along a whole
+		// track) has no one foot to bend from: height 0, and its leaves only flutter.
+		id.normalRow1[3] = mesh->desc.boundsCenter[1] - mesh->desc.boundsExtents[1];
+		id.normalRow2[3] = radius <= 30.0f ? 2.0f * mesh->desc.boundsExtents[1] : 0.0f;
+		// w: 1 = a plant: the mesh has leaves (foliage, or alpha tested double sided leaf cards), so its trunk and branches
+		// bend with them (else the leaves came away from a trunk that stood still)
+		for (const auto& h : inst.materials) {
+			const SceneMaterial* m = h ? store.Material(h) : nullptr;
+			if (m && (m->desc.materialClass == kAeMaterialVegetation ||
+				(m->desc.materialClass == kAeMaterialStandard && (m->desc.flags & kAeMaterialAlphaTest) && (m->desc.flags & kAeMaterialDoubleSided)))) {
+				id.reserved[3] = 1.0f;
+				break;
+			}
+		}
 		memcpy(&id.reserved[0], &inst.desc.renderingLayerMask, sizeof(uint32_t)); // read with asuint in the shader
 		id.reserved[1] = inst.moved ? 1.0f : 0.0f;
 		// z: natural tiling (hex tiling and a slow variation of brightness, setting naturalTiling). On what repeats its
@@ -841,7 +862,9 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 		if (lods) {
 			const float nearest = Length(center - cameraNow) - radius;
 			const float pixelsPerUnit = nearest > 0.0f ? lodPixelsPerUnit * scale / nearest : FLT_MAX;
-			while (lod < lods->levels && lods->error[lod + 1] * pixelsPerUnit <= lodPixelError_) {
+			// and never nearer than a distance per level (25 / 50 / 100 m at lodBias 2.8, farther with a higher bias):
+			// the simplifier's error measures the shape, not the shading, and nearer than that the simpler shapes showed
+			while (lod < lods->levels && lods->error[lod + 1] * pixelsPerUnit <= lodPixelError_ && nearest > lodMinDistance_ * float(1u << lod)) {
 				++lod;
 			}
 		}
@@ -929,7 +952,11 @@ void SceneRenderer::BuildDrawLists(const SceneFrame& scene, uint64_t frame) {
 			// positions only, and the colours painted between the vertices it took away would be lost)
 			const bool vertexColours = material && material->desc.layerCount > 1 && material->desc.layerVertexColor != 0;
 			item.lods = lods;
-			item.lod = vertexColours ? 0 : lod;
+			// (a car's parts are drawn in full: the camera is always near one, and a coarser bumper or wheel showed)
+			const uint32_t materialClass = material ? material->desc.materialClass : uint32_t(kAeMaterialUnsupported);
+			const bool vehiclePart = materialClass == kAeMaterialVehiclePaint || materialClass == kAeMaterialVehicleGeneric || materialClass == kAeMaterialVehicleGlass ||
+				materialClass == kAeMaterialVehicleRim || materialClass == kAeMaterialVehicleStitches || materialClass == kAeMaterialVehicleLights || materialClass == kAeMaterialVehicleTire;
+			item.lod = vertexColours || vehiclePart ? 0 : lod;
 			item.lodScale = scale;
 			item.sortKey = (uint64_t(mesh->layoutId) << 48) | (uint64_t(item.cull) << 46) | (uint64_t((flags & kAeMaterialAlphaTest) ? 1 : 0) << 45) |
 				((uint64_t(reinterpret_cast<uintptr_t>(material)) >> 4 & 0xFFFFF) << 24) | (uint64_t(reinterpret_cast<uintptr_t>(mesh)) >> 4 & 0xFFFFFF);
@@ -1149,9 +1176,13 @@ void SceneRenderer::UpdateProbes(const SceneFrame& scene, uint64_t frame) {
 // ---- the physical sky's sun (the atmosphere's numbers are the same as in shaders/aether_atmosphere.hlsli)
 
 // Where the sun stands at `hours` (0 .. 24) for a place at 35 degrees north in early summer; north is +Z, east +X.
-static Vec3 SunDirectionAt(float hours, float headingDegrees) {
+// The sun's direction at `hours` (local solar time) on day `day` of the year (1 .. 365) at `latitudeDegrees` north;
+// `headingDegrees` turns the whole path about the up axis (where the map's north is). The declination is Cooper's
+// approximation (within a degree of the real one).
+static Vec3 SunDirectionAt(float hours, float headingDegrees, int day = 172, float latitudeDegrees = 35.0f) {
 	const float kPi = 3.14159265f;
-	const float latitude = 35.0f * kPi / 180.0f, declination = 15.0f * kPi / 180.0f;
+	const float latitude = latitudeDegrees * kPi / 180.0f;
+	const float declination = 23.44f * kPi / 180.0f * std::sin(2.0f * kPi * float(284 + day) / 365.0f);
 	const float hourAngle = (hours - 12.0f) * 15.0f * kPi / 180.0f;
 	const float sinElevation = std::sin(latitude) * std::sin(declination) + std::cos(latitude) * std::cos(declination) * std::cos(hourAngle);
 	const float elevation = std::asin(std::min(std::max(sinElevation, -1.0f), 1.0f));
@@ -1191,6 +1222,109 @@ static Vec3 AtmosphereTransmittance(float cosZenith) {
 	return {float(std::exp(-depth[0])), float(std::exp(-depth[1])), float(std::exp(-depth[2]))};
 }
 
+// ---- the environment: the wind and the weather, eased from the settings (Environment in SceneRenderer.h)
+
+namespace {
+// What each weather asks of the sky and the ground. coverage: the clouds (the cloudCoverage setting stays a minimum);
+// fog: density added to the air's haze (per m; 0.009: some 300 m of visibility), fogShare: how much of it is a low
+// fog that thins within a few hundred metres up; gloom: how much a thick deck darkens the clouds' light (and with it
+// the sky's light on the ground; the sun is already shut out by the clouds' shadow); wet: what the ground tends to.
+struct WeatherTargets { float coverage, fog, fogShare, gloom, wet; };
+WeatherTargets TargetsOf(const std::string& w, float rainIntensity) {
+	if (w == "cloudy") return {0.6f, 0.0f, 0.0f, 0.1f, 0.0f};
+	if (w == "overcast") return {0.93f, 0.00015f, 0.0f, 0.45f, 0.0f};
+	if (w == "rain") return {1.0f, 0.0003f + 0.0007f * rainIntensity, 0.3f, 0.5f + 0.15f * rainIntensity, 1.0f};
+	if (w == "fog") return {0.75f, 0.009f, 1.0f, 0.35f, 0.25f};
+	return {0.0f, 0.0f, 0.0f, 0.0f, 0.0f}; // clear
+}
+// 1 / the fog's scale height: the air's haze thins over 1.2 km, the weather's low fog over 250 m
+float FogScaleInverse(float lowShare) {
+	return 1.0f / (1200.0f + (250.0f - 1200.0f) * std::min(std::max(lowShare, 0.0f), 1.0f));
+}
+} // namespace
+
+void SceneRenderer::UpdateEnvironment(const SettingsData& settings) {
+	const auto now = std::chrono::steady_clock::now();
+	const float dt = envStarted_ ? std::clamp(std::chrono::duration<float>(now - envClock_).count(), 0.0f, 0.25f) : 0.0f;
+	envClock_ = now;
+	Environment& e = env_;
+	const float kPi = 3.14159265f;
+	// ---- the wind: where it comes from as weather reports give it (0 from north, 90 from east), turned with the
+	// map's north like the sun's path (sunHeading); it blows the other way
+	const float from = (settings.windDirection + settings.sunHeading) * kPi / 180.0f;
+	const float bx = -std::sin(from), bz = -std::cos(from);
+	if (!envStarted_) {
+		e.windSpeed = settings.windSpeed;
+		e.windX = bx;
+		e.windZ = bz;
+		e.gust = settings.gustiness;
+		e.weather = e.from = settings.weather;
+		const WeatherTargets t = TargetsOf(settings.weather, settings.rainIntensity);
+		e.coverage = t.coverage;
+		e.fogExtra = t.fog;
+		e.fogShare = t.fogShare;
+		e.gloom = t.gloom;
+		e.rain = settings.weather == "rain" ? settings.rainIntensity : 0.0f;
+		e.blend = 1.0f;
+		envStarted_ = true;
+	}
+	// (a change of the wind settings is a change of the wind, not a cut: a few seconds)
+	const float windEase = 1.0f - std::exp(-dt * 0.6f);
+	e.windSpeed += (settings.windSpeed - e.windSpeed) * windEase;
+	e.gust += (settings.gustiness - e.gust) * windEase;
+	{
+		float x = e.windX + (bx - e.windX) * windEase, z = e.windZ + (bz - e.windZ) * windEase;
+		const float len = std::sqrt(x * x + z * z);
+		if (len < 1e-3f) {
+			x = bx; // (turned right round: take the new way at once)
+			z = bz;
+		} else {
+			x /= len;
+			z /= len;
+		}
+		e.windX = x;
+		e.windZ = z;
+	}
+	e.windTime = std::fmod(e.windTime + double(dt), 4096.0);
+	e.dt = dt;
+	// ---- the weather: every part eases towards the chosen weather's numbers (95 % in about 20 s)
+	if (settings.weather != e.weather) {
+		e.from = e.weather;
+		e.weather = settings.weather;
+		e.blend = 0.0f;
+	}
+	const WeatherTargets t = TargetsOf(e.weather, settings.rainIntensity);
+	const float ease = 1.0f - std::exp(-dt / 6.5f);
+	e.coverage += (t.coverage - e.coverage) * ease;
+	e.fogExtra += (t.fog - e.fogExtra) * ease;
+	e.fogShare += (t.fogShare - e.fogShare) * ease;
+	e.gloom += (t.gloom - e.gloom) * ease;
+	e.rain += ((e.weather == "rain" ? settings.rainIntensity : 0.0f) - e.rain) * ease;
+	e.blend += (1.0f - e.blend) * ease;
+	// ---- the ground: wet in one to two minutes of rain (sooner the harder it rains), damp in fog, dry over about ten
+	// minutes after; puddles form on wet ground in a few minutes of rain and last a little longer than the wet
+	if (e.rain > 0.02f && e.wetness < t.wet) {
+		e.wetness = std::min(t.wet, e.wetness + dt * (0.5f + e.rain) / 90.0f);
+	} else if (t.wet > 0.0f && e.wetness < t.wet) {
+		e.wetness = std::min(t.wet, e.wetness + dt / 300.0f);
+	} else if (e.wetness > t.wet || e.rain <= 0.02f) {
+		e.wetness = std::max(e.wetness > t.wet ? t.wet : 0.0f, e.wetness - dt / 600.0f);
+	}
+	const float puddleCap = e.rain > 0.02f ? std::min(0.3f + 0.7f * e.rain, 1.0f) : 0.0f;
+	if (e.rain > 0.1f && e.wetness > 0.7f && e.puddles < puddleCap) {
+		e.puddles = std::min(puddleCap, e.puddles + dt * e.rain / 240.0f);
+	} else if (e.puddles > puddleCap) {
+		e.puddles = std::max(puddleCap, e.puddles - dt / 900.0f);
+	}
+	wetnessShown_.store(e.wetness);
+	puddlesShown_.store(e.puddles);
+	gustShown_.store(e.gust);
+	// (near the ground, where the smoke is, the wind is about half its speed 10 m up on a built up site)
+	groundWind_[0].store(e.windX * e.windSpeed * 0.5f);
+	groundWind_[1].store(0.0f);
+	groundWind_[2].store(e.windZ * e.windSpeed * 0.5f);
+}
+
 void SceneRenderer::BuildCascades(const SceneFrame& scene, const SettingsData& settings) {
 	cascades_.clear();
 	hasSun_ = sunShadows_ = false;
@@ -1227,9 +1361,32 @@ void SceneRenderer::BuildCascades(const SceneFrame& scene, const SettingsData& s
 		// (the scene at night while the time of day setting says day: the sky's hour is midnight)
 		const bool sceneNight = settings.followSceneNight && sceneNight_.load();
 		sceneSunLum_ = hasSun_ ? best : 0.0f;
-		sunDirection_ = SunDirectionAt(settings.timeOfDay, settings.sunHeading);
+		// the date: the setting's, or today's
+		int day = settings.dayOfYear;
+		if (day <= 0) {
+			const std::time_t t = std::time(nullptr);
+			std::tm local = {};
+			localtime_s(&local, &t);
+			day = local.tm_yday + 1;
+		}
+		// the time of day: the setting's, moved on by the time flow since the setting last changed
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const float dt = std::min(std::chrono::duration<float>(now - timeClock_).count(), 0.25f);
+			timeClock_ = now;
+			if (settings.timeOfDay != timeFlowFrom_ || settings.timeFlow == "stopped") {
+				timeFlowFrom_ = settings.timeOfDay;
+				timeFlowHours_ = 0.0f;
+			}
+			const float rate = settings.timeFlow == "realtime" ? 1.0f / 3600.0f : settings.timeFlow == "fast" ? 1.0f / 60.0f : 0.0f;
+			timeFlowHours_ = std::fmod(timeFlowHours_ + dt * rate, 24.0f);
+		}
+		const float hours = std::fmod(settings.timeOfDay + timeFlowHours_, 24.0f);
+		currentHours_.store(hours);
+		currentDay_.store(day);
+		sunDirection_ = SunDirectionAt(hours, settings.sunHeading, day, settings.latitude);
 		if (sceneNight && sunDirection_.y > -0.21f) {
-			sunDirection_ = SunDirectionAt(0.0f, settings.sunHeading);
+			sunDirection_ = SunDirectionAt(0.0f, settings.sunHeading, day, settings.latitude);
 		}
 		// Night: once the twilight is over (the sun 7 to 12 degrees under the horizon) the light in the sky is the
 		// moon's. A full moon, which stands opposite the sun. Everything that knows of "the sun" (shadows, the sky's
@@ -1266,6 +1423,13 @@ void SceneRenderer::BuildCascades(const SceneFrame& scene, const SettingsData& s
 		if (!hasSun_) {
 			sunColor_ = {0, 0, 0};
 		}
+	}
+	// the weather's fog takes the sun's light on its way down through it (the fog lies low: its depth above the
+	// camera is about its scale height); what it scatters instead is the fog's own glow (the fog passes)
+	if (hasSun_ && env_.fogExtra > 0.0f) {
+		const float scaleHeight = 1.0f / FogScaleInverse(env_.fogShare);
+		const float through = std::exp(-env_.fogExtra * scaleHeight / std::max(sunDirection_.y, 0.05f));
+		sunColor_ = sunColor_ * through;
 	}
 	if (!hasSun_ || !sunShadows_ || !settings.shadows || !shadowAtlas_) {
 		sunShadows_ = false;
@@ -1536,7 +1700,7 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 	// veil over everything a few tens of metres away, the shade of a workshop 15 m off among it.)
 	const float kAirExtinction = 9.5e-5f; // per metre
 	const float fogDensity = physicalSky_ ? kAirExtinction : f.fogDensity;
-	volumetricFog_ = settings.volumetricFog && fogDensity * settings.fogStrength > 0.0f;
+	volumetricFog_ = settings.volumetricFog && (fogDensity + env_.fogExtra) * settings.fogStrength > 0.0f;
 	fc.qualityParams[1] = volumetricFog_ ? 1.0f : 0.0f;
 	fc.qualityParams[3] = rayReflections_ ? 1.0f : 0.0f; // (smooth surfaces mirror what rays through the scene find)
 	// bounced light: read from the picture of the frame before, so only with the temporal history
@@ -1828,17 +1992,39 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 		}
 	}
 	// clouds: with the physical sky, where the setting asks for any (set here: the constants are uploaded right below)
-	clouds_ = physicalSky_ && settings.cloudCoverage > 0.01f;
+	// (the weather's clouds over the setting's: the setting is the least there is)
+	const float coverage = std::max(settings.cloudCoverage, env_.coverage);
+	clouds_ = physicalSky_ && coverage > 0.01f;
 	{
-		const auto now = std::chrono::steady_clock::now();
-		cloudDrift_ += std::min(std::chrono::duration<float>(now - cloudClock_).count(), 0.25f) * settings.cloudSpeed * 0.0012f;
-		cloudDrift_ -= std::floor(cloudDrift_ / 64.0f) * 64.0f;
-		cloudClock_ = now;
+		// The clouds drift with the wind: at their height (1.3 to 3.3 km) it blows two to three times as fast as 10 m
+		// above the ground (and they creep along in a calm). cloudSpeed is a factor on it. The noise is looked up at
+		// place / 7 km + drift, so the pattern travels the wind's way when the drift goes against it.
+		const float cloudWind = (1.5f + 2.2f * env_.windSpeed) * settings.cloudSpeed; // m/s
+		const float step = env_.dt * cloudWind / 7000.0f; // noise uv
+		cloudDrift_ -= env_.windX * step;
+		cloudDriftZ_ -= env_.windZ * step;
+		// (wrapped where every lookup of the noise repeats: 100 is a whole number of periods for all of them)
+		cloudDrift_ -= std::floor(cloudDrift_ / 100.0f) * 100.0f;
+		cloudDriftZ_ -= std::floor(cloudDriftZ_ / 100.0f) * 100.0f;
 	}
-	fc.clouds[0] = clouds_ ? settings.cloudCoverage : 0.0f;
+	fc.clouds[0] = clouds_ ? coverage : 0.0f;
 	fc.clouds[1] = cloudDrift_;
-	fc.clouds[2] = cloudDrift_ * 0.37f;
+	fc.clouds[2] = cloudDriftZ_;
 	fc.clouds[3] = clouds_ ? 1.0f : 0.0f;
+	// ---- the environment's constants
+	fc.wind[0] = env_.windX;
+	fc.wind[1] = env_.windZ;
+	fc.wind[2] = env_.windSpeed;
+	fc.wind[3] = env_.gust;
+	fc.windTime[0] = float(env_.windTime);
+	fc.windTime[1] = env_.dt;
+	fc.windTime[2] = env_.windSpeed > 0.05f ? 1.0f : 0.0f;
+	fc.windTime[3] = float(std::fmod(env_.windTime, 1024.0));
+	fc.weather[0] = env_.wetness;
+	fc.weather[1] = env_.puddles;
+	fc.weather[2] = env_.rain;
+	fc.weather[3] = env_.gloom;
+	rain_ = env_.rain > 0.005f;
 	frameSky_ = fc.misc[1] > 0.5f;
 	fc.misc[2] = sky ? float(std::max<uint32_t>(sky->desc.mipCount, 1)) : 1.0f;
 	fc.misc[3] = f.ambientIntensity;
@@ -1848,21 +2034,28 @@ bool SceneRenderer::UploadFrameData(const SceneFrame& scene, const Target& targe
 	const bool fogFromSky = (f.fogFlags & kAeFogColorFromSky) != 0;
 	if (physicalSky_) {
 		// the air's own haze (see volumetricFog_ above): white, lit by the sun and the sky, from the ground up
+		// (with the weather's fog: denser, and the low fog's share thins faster with height; it lies round the camera's
+		// height, so that it is there on a map whatever its altitude)
+		const float low = env_.fogExtra > 0.0f ? env_.fogShare * env_.fogExtra / (env_.fogExtra + fogDensity) : 0.0f;
 		fc.fog[0] = fc.fog[1] = fc.fog[2] = 1.0f;
-		fc.fog[3] = fogDensity * settings.fogStrength;
-		fc.fogHeight[0] = 0.0f;
-		fc.fogHeight[1] = 1.0f / 1200.0f;
+		fc.fog[3] = (fogDensity + env_.fogExtra) * settings.fogStrength;
+		fc.fogHeight[0] = low * (f.cameraPosition[1] - 30.0f);
+		fc.fogHeight[1] = FogScaleInverse(low);
 		fc.fogHeight[2] = 0.0f;
 		fc.fogHeight[3] = 1.0f;
 	} else {
 		memcpy(fc.fog, fogFromSky ? f.fogTint : f.fogColor, sizeof(f.fogColor));
-		fc.fog[3] = f.fogDensity * settings.fogStrength;
+		fc.fog[3] = (f.fogDensity + env_.fogExtra) * settings.fogStrength;
 		fc.fogHeight[0] = f.fogBaseHeight;
 		// HDRP's height fog: the layer's depth times 0.144765 is the height over which the density falls to 1 / e
 		fc.fogHeight[1] = 1.0f / (std::max(0.01f, f.fogMaxHeight - f.fogBaseHeight) * 0.144765f);
-		fc.fogHeight[2] = f.fogMaxDistance;
+		fc.fogHeight[2] = env_.fogExtra > 0.0f ? 0.0f : f.fogMaxDistance; // (the weather's fog has no end)
 		fc.fogHeight[3] = fogFromSky ? 1.0f : 0.0f;
 	}
+	// the weather's own share, for the sky behind it (PSSky): the same height profile
+	fc.weatherFog[0] = env_.fogExtra * settings.fogStrength;
+	fc.weatherFog[1] = fc.fogHeight[1];
+	fc.weatherFog[2] = fc.fogHeight[0];
 
 	auto upload = [&](const void* data, size_t bytes, size_t align) -> D3D12_GPU_VIRTUAL_ADDRESS {
 		UploadAllocation a = gpu.Upload(std::max<size_t>(bytes, 16), align);
@@ -2344,7 +2537,8 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	// ---- automatic levels of detail: the levels that arrived go to the GPU (before anything is drawn)
 	MeshLods::Get().BeginFrame(device_, list, retireFence);
 	autoLod_ = settings.autoLod;
-	lodPixelError_ = 2.0f / std::max(settings.lodBias, 0.1f);
+	lodPixelError_ = 1.0f / std::max(settings.lodBias, 0.1f); // (0.25 px at lodBias 4)
+	lodMinDistance_ = 25.0f * std::max(settings.lodBias, 0.1f) / 2.8f;
 	SceneBvh::Get().SetPoseBudget(uint32_t(std::clamp(settings.skinnedRayUpdates, 0.0f, 64.0f) + 0.5f));
 	SceneBvh::Get().BeginFrame(device_, list, retireFence, frame);
 	SceneBvh::Get().BeginInstances();
@@ -2504,6 +2698,7 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		untracedAtlas_ = gpu.CreateTexture(d, "Scene.ShadowAtlasUntraced", ResourceCategory::ShadowMap, Lifetime::Persistent, frame);
 		untracedShadow_ = untracedAtlas_ != nullptr;
 	}
+	UpdateEnvironment(settings);
 	BuildCascades(scene, settings);
 	lampShadows_ = bvhReady_ && settings.lampShadows;
 	BuildClusters(scene);
@@ -2607,6 +2802,9 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		ctx.list->RSSetScissorRects(1, &scissor);
 		BindCommon(ctx.list, false);
 		DrawItems(ctx, opaque_, kDepth, kDepthAlpha, -1);
+		if (env_.windSpeed > 0.05f) {
+			ctx.note = Format("plants sway in a %.1f m/s wind (the same in the opaque and shadow passes; their motion vectors carry it)", env_.windSpeed);
+		}
 	});
 	// ---- the sky's diffuse light: the sky cube convolved with the cosine lobe, per direction (a small octahedral map)
 	if (!irradiance_) {
@@ -2966,6 +3164,9 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 			ctx.note += Format("; auto LOD (camera's view): %llu of %llu triangles (%.0f %%), instances per level %u / %u / %u / %u, %u without levels",
 				(unsigned long long)drawn, (unsigned long long)lodFullTriangles_, 100.0 * double(drawn) / double(lodFullTriangles_),
 				lodInstances_[0], lodInstances_[1], lodInstances_[2], lodInstances_[3], lodInstancesWithout_);
+		}
+		if (env_.wetness + env_.puddles > 0.001f) {
+			ctx.note += Format("; wet ground %.0f %%, puddles %.0f %% (a roof ray per wet pixel)", env_.wetness * 100.0f, env_.puddles * 100.0f);
 		}
 	});
 	// ---- screen space reflections: what a smooth surface mirrors, where that is on screen. Read from the picture of the
@@ -3505,6 +3706,25 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 	} else {
 		historyValid_ = false;
 	}
+	// ---- falling rain (the weather): streaks round the camera, hidden behind what is nearer by the scene's depth. After
+	// the temporal resolve (the history must not keep them: they are new every frame, and TAA or DLSS would smear them
+	// into a haze) into a copy of the picture at the output size, before the motion blur and the bloom
+	if (rain_) { // (also over the path traced picture: drawn after its denoiser, never into its samples)
+		const RenderGraph::ResourceId rained = graph_.CreateTransient("SceneRain", postDesc, ResourceCategory::RenderTarget);
+		const RenderGraph::ResourceId source = post;
+		graph_.AddPass("Rain", true, [&, source, depth, rained](RenderGraph::Builder& b) {
+			b.Read(source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			b.Read(depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			if (skyLight) {
+				b.Read(irradiance, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			}
+			b.Write(rained, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		}, [&, source, depth, rained](RenderGraph::PassContext& ctx) {
+			if (Fullscreen(ctx, kFullscreenRain, ctx.Texture(rained), ctx.Texture(source), ctx.Texture(depth)))
+			ctx.note =Format("rain %.2f, wind %.1f m/s, four layers of streaks; a roof ray per streak pixel", env_.rain, env_.windSpeed);
+		});
+		post = rained;
+	}
 	// motion blur: along the way every still point of the world moved on screen since the frame before (the camera's motion)
 	if (motionBlur_ > 0.0f) {
 		const RenderGraph::ResourceId blurred = graph_.CreateTransient("SceneMotionBlur", postDesc, ResourceCategory::RenderTarget);
@@ -3752,6 +3972,14 @@ bool SceneRenderer::Render(const HostGfx& host, ID3D12GraphicsCommandList* list,
 		{"reflectionProbes", {{"host", scene.probes.size()}, {"inFrame", probesInFrame_}}},
 		{"sky", {{"sceneNight", sceneNight_.load()}, {"moonShare", moonShare_}, {"sceneSunLuminance", sceneSunLum_}, {"lightLuminance", sunColor_.x * 0.2126f + sunColor_.y * 0.7152f + sunColor_.z * 0.0722f}, {"atmosphereScale", atmosphereScale_}}},
 		{"particles", {{"submitted", scene.particles.size()}, {"batches", scene.particleBatches.size()}, {"drawn", particlesDrawn_}}},
+		{"environment", {
+			{"weather", env_.weather}, {"from", env_.from}, {"transition", env_.blend},
+			{"cloudCoverage", std::max(settings.cloudCoverage, env_.coverage)}, {"weatherCoverage", env_.coverage},
+			{"fogAdded", env_.fogExtra}, {"lowFogShare", env_.fogShare}, {"deckDarkening", env_.gloom},
+			{"rain", env_.rain}, {"rainPass", rain_}, {"wetness", env_.wetness}, {"puddles", env_.puddles},
+			{"wind", {{"speed", env_.windSpeed}, {"blowsTowards", {env_.windX, env_.windZ}}, {"fromDegrees", settings.windDirection}, {"gustiness", env_.gust}, {"clock", env_.windTime}}},
+			{"cloudDrift", {cloudDrift_, cloudDriftZ_}},
+			{"note", "wetness: 0 dry .. 1 wet (1-2 min of rain to wet, ~10 min to dry); puddles form on wet level ground; plants sway in the raster passes only (not in the ray tracing geometry)"}}},
 		{"sceneColorFormat", int(kSceneColorFormat)},
 	};
 	{

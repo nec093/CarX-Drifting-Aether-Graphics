@@ -23,12 +23,102 @@ struct VSOutput {
 	float4 clipBefore : CLIPBEFORE; // where the vertex was in the frame before (its own motion and the camera's)
 };
 
+// ---- the wind in the plants (g_Wind, g_WindTime). The same in every pass that draws a plant (the depth prepass, the
+// opaque pass, the shadow cascades): the depth test is "equal" after the prepass, and a shadow must stay on its leaf.
+// The rays' geometry does not sway (its triangles are the mesh's own), nor does the path tracer's.
+//
+// What sways: plants (Sways below). How: the whole plant bends along the wind, more with the height
+// above its foot (the square of it: a stem bends most at the top) and less the taller it is (a trunk is stiff, grass is
+// not); it swings round that bend at its own slow pace; gusts are a noise field that travels with the wind, so they
+// sweep across a field as waves; and the leaves flutter fast and little along their normals.
+
+float WindHash(float2 p) {
+	float3 q = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+	q += dot(q, q.yzx + 33.33);
+	return frac((q.x + q.y) * q.z);
+}
+
+float WindNoise(float2 p) {
+	float2 i = floor(p), f = frac(p);
+	float2 u = f * f * (3.0 - 2.0 * f);
+	return lerp(lerp(WindHash(i), WindHash(i + float2(1, 0)), u.x), lerp(WindHash(i + float2(0, 1)), WindHash(i + float2(1, 1)), u.x), u.y);
+}
+
+// A leaf: foliage, or a plain alpha tested, double sided surface (a map's own leaf cards; fences and nets are the same
+// kind of surface, and sway a little with them).
+bool IsLeaf(MaterialData mat) {
+	const uint cls = (uint)mat.params2.z;
+	return cls == CLASS_VEGETATION || (cls == CLASS_STANDARD && mat.params.z >= 0.0 && (((uint)mat.params2.w) & 4u) != 0u);
+}
+
+// What sways: on a plant (an instance with leaves, no larger than a big tree: InstanceData.layers.w, normalRow2.w) all
+// of it bends, trunk and branches with the leaves; on a larger mesh (a static batch of many plants) only the foliage,
+// which flutters without bending (it has no one foot to bend from).
+bool Sways(MaterialData mat, InstanceData inst) {
+	if (g_WindTime.z < 0.5) {
+		return false;
+	}
+	const uint cls = (uint)mat.params2.z;
+	if (inst.layers.w > 0.5 && inst.normalRow2.w > 0.0) {
+		return cls == CLASS_VEGETATION || cls == CLASS_STANDARD || cls == CLASS_COLOR_MASK;
+	}
+	return cls == CLASS_VEGETATION;
+}
+
+// How far the wind moves a vertex at time t. `p`: the vertex in the world, `local`: in the mesh's space, `n`: its world
+// normal, `leaf`: it flutters too.
+float3 WindSway(InstanceData inst, float3 p, float3 local, float3 n, float t, bool leaf) {
+	const float speed = g_Wind.z;
+	const float2 dir = g_Wind.xy;
+	// the force grows faster than the speed (drag), up to a storm
+	const float force = min(speed / 10.0 * (0.5 + 0.5 * speed / 10.0), 3.0);
+	const float3 origin = float3(inst.world[0][3], inst.world[1][3], inst.world[2][3]);
+	// gusts: a field some 25 m across that the wind carries (slower than the wind itself: the gust's front)
+	const float along = dot(p.xz, dir), across = dot(p.xz, float2(-dir.y, dir.x));
+	const float2 at = float2((along - t * speed * 0.7) / 25.0, across / 40.0);
+	const float field = WindNoise(at) * 0.7 + WindNoise(at * 2.3 + 7.1) * 0.3;
+	const float gust = max(1.0 + g_Wind.w * (field * 2.0 - 0.8) * 1.6, 0.15);
+	// the plant's foot and height (the mesh's bounds; 0: a mesh too large to have one)
+	const float scaleY = length(float3(inst.world[0][1], inst.world[1][1], inst.world[2][1]));
+	const float height = inst.normalRow2.w * scaleY;
+	const float h = max(local.y - inst.normalRow1.w, 0.0) * scaleY;
+	float3 offset = 0.0;
+	if (height > 0.05) {
+		const float rel = saturate(h / height);
+		const float flex = 1.0 / (1.0 + height / 3.0);
+		const float phase = dot(origin.xz, float2(0.37, 0.61));
+		const float swing = sin(t * 6.2831853 * 0.9 / sqrt(height + 0.3) + phase);
+		const float angle = 0.15 * force * flex * gust * (1.0 + 0.3 * swing);
+		const float side = 0.2 * force * flex * sin(t * 6.2831853 * 0.55 / sqrt(height + 0.3) + phase * 1.7);
+		const float2 bend = (dir * angle + float2(-dir.y, dir.x) * side * 0.15) * height * rel * rel;
+		offset.xz = bend;
+		offset.y = -dot(bend, bend) / max(2.0 * h, 0.1); // (a stem keeps its length: the top comes down a little)
+	}
+	// the leaves' flutter: fast, small, along the normal, a phase of their own per place (none at the foot)
+	if (leaf) {
+		const float foot = height > 0.05 ? saturate(h / max(0.25 * height, 0.05)) : 1.0;
+		const float flutter = (0.004 + 0.012 * force) * gust * foot * (height > 0.05 ? 1.0 : 0.5);
+		offset += n * flutter * sin(t * (7.0 + 5.0 * force) + dot(p, float3(3.1, 2.3, 1.7)));
+	}
+	return offset;
+}
+
 VSOutput VSMain(VSInput input, uint instanceId : SV_InstanceID) {
 	const uint instance = g_InstanceMap[g_InstanceIndex + instanceId];
 	InstanceData inst = g_Instances[instance];
 	MaterialData mat = g_Materials[g_MaterialIndex];
 	VSOutput o;
 	float4 world = mul(inst.world, float4(input.position, 1.0));
+	float3 swayBefore = 0.0;
+	if (Sways(mat, inst)) {
+		float3x3 nm = float3x3(inst.normalRow0.xyz, inst.normalRow1.xyz, inst.normalRow2.xyz);
+		float3 n = normalize(mul(nm, input.normal.xyz));
+		const bool leaf = IsLeaf(mat);
+		world.xyz += WindSway(inst, world.xyz, input.position, n, g_WindTime.x, leaf);
+		// (and where the frame before had it: the motion vectors carry the sway, or TAA and DLSS smear the leaves)
+		float3 before = mul(inst.prevWorld, float4(input.position, 1.0)).xyz;
+		swayBefore = WindSway(inst, before, input.position, n, g_WindTime.x - g_WindTime.y, leaf);
+	}
 	o.worldPos = world.xyz;
 	float4 view = mul(g_View, world);
 	o.viewDepth = -view.z; // right-handed view space: the camera looks down -Z
@@ -40,16 +130,21 @@ VSOutput VSMain(VSInput input, uint instanceId : SV_InstanceID) {
 	o.color = input.color;
 	o.instance = instance;
 	o.clipNow = float4(o.position.xy - g_Jitter.xy * o.position.w, o.position.zw);
-	o.clipBefore = mul(g_PrevViewProj, mul(inst.prevWorld, float4(input.position, 1.0)));
+	o.clipBefore = mul(g_PrevViewProj, float4(mul(inst.prevWorld, float4(input.position, 1.0)).xyz + swayBefore, 1.0));
 	return o;
 }
 
-// Shadow cascades: the same vertex data through the cascade's matrix.
+// Shadow cascades: the same vertex data through the cascade's matrix (swayed by the wind as in VSMain).
 float4 VSShadow(VSInput input, uint instanceId : SV_InstanceID, out float2 uv : TEXCOORD0) : SV_Position {
 	InstanceData inst = g_Instances[g_InstanceMap[g_InstanceIndex + instanceId]];
 	MaterialData mat = g_Materials[g_MaterialIndex];
 	uv = input.uv * mat.uvScaleOffset.xy + mat.uvScaleOffset.zw;
-	return mul(g_ShadowViewProj[g_CascadeIndex], mul(inst.world, float4(input.position, 1.0)));
+	float4 world = mul(inst.world, float4(input.position, 1.0));
+	if (Sways(mat, inst)) {
+		float3x3 nm = float3x3(inst.normalRow0.xyz, inst.normalRow1.xyz, inst.normalRow2.xyz);
+		world.xyz += WindSway(inst, world.xyz, input.position, normalize(mul(nm, input.normal.xyz)), g_WindTime.x, IsLeaf(mat));
+	}
+	return mul(g_ShadowViewProj[g_CascadeIndex], world);
 }
 
 // Depth only, for alpha tested materials (opaque ones have no pixel shader in the depth passes).
@@ -655,6 +750,26 @@ float4 ShadeForward(VSOutput input, bool frontFace, out float4 surface) {
 	}
 	s.normal = N;
 	s.coatNormal = N;
+	// ---- rain (g_Weather): wet ground is darker where it is porous (water fills the pores: less light scatters back
+	// out) and smoother (a film of water over it); a puddle is level water, a mirror over a darker ground, which the
+	// reflection pass then traces like any other smooth surface. Opaque surfaces that are not part of a car; under a
+	// roof (one ray up) they stay dry.
+	if ((g_DrawFlags & 2u) == 0u && (materialClass == CLASS_STANDARD || materialClass == CLASS_COLOR_MASK || materialClass == CLASS_VEGETATION)) {
+		const float3 geometric = normalize(input.normal) * (outside ? 1.0 : -1.0);
+		const float2 wet = SurfaceWetness(input.worldPos, geometric, true);
+		if (wet.x > 0.0) {
+			const float porous = saturate(s.roughness * 1.5 - 0.25) * (1.0 - s.metallic);
+			s.albedo *= lerp(1.0, lerp(0.85, 0.45, porous), wet.x);
+			s.roughness = lerp(s.roughness, min(s.roughness, 0.22), wet.x);
+			N = normalize(lerp(N, geometric, wet.y));
+			s.roughness = lerp(s.roughness, 0.02, wet.y);
+			s.albedo *= lerp(1.0, 0.7, wet.y);
+			s.metallic *= 1.0 - wet.y;
+			s.occlusion = lerp(s.occlusion, 1.0, wet.y);
+			s.normal = N;
+			s.coatNormal = N;
+		}
+	}
 	// (Metal is filtered little too: on thin round shapes, a mesh wheel's spokes, the normal turns fast across every
 	// pixel and the full filter took a gold or chromed spoke to roughness 0.6 and more, an even flat colour where the
 	// path traced picture shows a mirror. The temporal antialiasing (or DLSS) keeps what is left of the shimmer.)

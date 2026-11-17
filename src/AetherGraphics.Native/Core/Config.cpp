@@ -83,8 +83,16 @@ static json ToJsonData(const SettingsData& d) {
 		{"skyMode", d.skyMode},
 		{"timeOfDay", d.timeOfDay},
 		{"sunHeading", d.sunHeading},
+		{"dayOfYear", d.dayOfYear},
+		{"latitude", d.latitude},
+		{"timeFlow", d.timeFlow},
 		{"cloudCoverage", d.cloudCoverage},
 		{"cloudSpeed", d.cloudSpeed},
+		{"windSpeed", d.windSpeed},
+		{"windDirection", d.windDirection},
+		{"gustiness", d.gustiness},
+		{"weather", d.weather},
+		{"rainIntensity", d.rainIntensity},
 		{"exposureEV", d.exposureEV},
 		{"autoExposure", d.autoExposure},
 		{"vramBudgetMB", d.vramBudgetMB},
@@ -160,7 +168,15 @@ json Settings::Schema() {
 		{"skyMode", oneOf(kSkyModes, "Sky and sun: physical (Aether's atmosphere at timeOfDay) or scene (the scene's own sky texture and sun)")},
 		{"timeOfDay", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 24.0}, {"description", "Time of day in hours for the physical sky"}}},
 		{"cloudCoverage", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}, {"description", "How much of the sky the clouds take (physical sky; 0 = no clouds)"}}},
-		{"cloudSpeed", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 4.0}, {"description", "How fast the clouds drift"}}},
+		{"cloudSpeed", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 4.0}, {"description", "How fast the clouds drift, as a factor on the speed the wind gives them"}}},
+		{"windSpeed", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 25.0}, {"description", "The wind's speed in m/s (10 m above the ground): plants sway, clouds and smoke drift, rain slants"}}},
+		{"windDirection", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 360.0}, {"description", "Where the wind comes from, in degrees as weather reports give it (0 from the map's north, 90 from the east; north as sunHeading turns it)"}}},
+		{"gustiness", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}, {"description", "How strong the gusts are (0 a steady wind); gusts sweep across along the wind"}}},
+		{"weather", oneOf({"clear", "cloudy", "overcast", "rain", "fog"}, "The weather the sky eases towards over about 20 s: more clouds, a darker overcast deck, rain (wet roads that dry slowly afterwards, puddles, falling rain), thick fog. cloudCoverage stays a minimum")},
+		{"rainIntensity", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}, {"description", "How hard it rains when weather is rain (the streaks, how fast roads get wet and puddles form)"}}},
+		{"dayOfYear", {{"type", "integer"}, {"minimum", 0}, {"maximum", 365}, {"description", "The date the sun's path is for, as a day of the year (1 = 1 January); 0 = today's date"}}},
+		{"latitude", {{"type", "number"}, {"minimum", -66.0}, {"maximum", 66.0}, {"description", "Where on the earth the map lies, in degrees north (negative: south): the sun's height and path through the day"}}},
+		{"timeFlow", oneOf({"stopped", "realtime", "fast"}, "The time of day: stopped at timeOfDay, moving on in real time, or fast (an hour a minute). Changing timeOfDay starts again from there")},
 		{"sunHeading", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 360.0}, {"description", "Turns the sun's path about the up axis, in degrees (physical sky)"}}},
 		{"shadowSoftness", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 4.0}, {"description", "How far the sun's shadow edges are blurred, in shadow map texels (0 = hard)"}}},
 		{"motionBlurStrength", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 2.0}, {"description", "Motion blur strength, as a factor on what the scene asks for"}}},
@@ -323,6 +339,24 @@ static std::string Apply(SettingsData& d, const std::string& key, const json& va
 		(key == "cloudCoverage" ? d.cloudCoverage : d.cloudSpeed) = float(value.get<double>());
 		return {};
 	}
+	if (key == "windSpeed" || key == "windDirection" || key == "gustiness" || key == "rainIntensity") {
+		const double hi = key == "windSpeed" ? 25.0 : key == "windDirection" ? 360.0 : 1.0;
+		if (!value.is_number() || !(value.get<double>() >= 0.0 && value.get<double>() <= hi)) {
+			return Format("%s must be a number between 0 and %g", key.c_str(), hi);
+		}
+		(key == "windSpeed" ? d.windSpeed : key == "windDirection" ? d.windDirection : key == "gustiness" ? d.gustiness : d.rainIntensity) = float(value.get<double>());
+		return {};
+	}
+	if (key == "weather") return wantEnum(d.weather, {"clear", "cloudy", "overcast", "rain", "fog"});
+	if (key == "dayOfYear") return wantInt(d.dayOfYear, 0, 365);
+	if (key == "latitude") {
+		if (!value.is_number() || !(value.get<double>() >= -66.0 && value.get<double>() <= 66.0)) {
+			return "latitude must be between -66 and 66";
+		}
+		d.latitude = float(value.get<double>());
+		return {};
+	}
+	if (key == "timeFlow") return wantEnum(d.timeFlow, {"stopped", "realtime", "fast"});
 	if (key == "timeOfDay" || key == "sunHeading") {
 		const double hi = key == "timeOfDay" ? 24.0 : 360.0;
 		if (!value.is_number() || !(value.get<double>() >= 0.0 && value.get<double>() <= hi)) {

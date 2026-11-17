@@ -115,15 +115,23 @@ AetherGraphics.MCP.exe [--allow-control] [--pipe <name>] [--list-tools]
 
 ### set_graphics_option のオプション
 
-受け付けるのは次の 29 個です（`Api.cpp` の `kOptions`）。範囲の検証は設定と同じ（`src/AetherGraphics.Native/Core/Config.cpp`）です。
+受け付けるのは次の 39 個です（`Api.cpp` の `kOptions`）。範囲の検証は設定と同じ（`src/AetherGraphics.Native/Core/Config.cpp`）です。
 
 | オプション | 値 | 内容 |
 |---|---|---|
 | `skyMode` | `physical` / `scene` | 空と太陽：Aether の大気（`timeOfDay` の時刻）か、シーン自身の空のテクスチャーと太陽 |
 | `timeOfDay` | 0〜24 | 物理的な空の時刻（時） |
 | `sunHeading` | 0〜360 | 太陽の通り道を上向きの軸の周りに回す（度） |
-| `cloudCoverage` | 0〜1 | 雲の量（0 で雲なし） |
-| `cloudSpeed` | 0〜4 | 雲の流れる速さ |
+| `cloudCoverage` | 0〜1 | 雲の量（0 で雲なし）。天気の雲量との大きい方を使う（最低の雲量） |
+| `cloudSpeed` | 0〜4 | 風が雲を運ぶ速さへの係数 |
+| `dayOfYear` | 0〜365（整数） | 太陽の通り道の日付（1 = 1 月 1 日、0 = 今日） |
+| `latitude` | −66〜66 | マップの緯度（度、南は負） |
+| `timeFlow` | `stopped` / `realtime` / `fast` | 時刻の流れ：止める、実時間、早送り（1 分で 1 時間） |
+| `windSpeed` | 0〜25 | 風の速さ（m/s、地上 10 m） |
+| `windDirection` | 0〜360 | 風が吹いてくる方角（度。0 が北から、90 が東から） |
+| `gustiness` | 0〜1 | 突風の強さ |
+| `weather` | `clear` / `cloudy` / `overcast` / `rain` / `fog` | 天気（約 20 秒かけて移る）。状態は `get_status` の `sceneRenderer.environment` |
+| `rainIntensity` | 0〜1 | 雨のときの強さ |
 | `shadowSoftness` | 0〜4 | 太陽の影の縁のぼかし（シャドウマップのテクセル数。0 で硬い影） |
 | `indirectStrength` | 0〜3 | 照り返しの係数 |
 | `fogStrength` | 0〜20 | 霧の濃さの係数（物理の空では空気の霞、シーンの空ではシーンの霧に掛かる） |

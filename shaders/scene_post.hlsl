@@ -15,6 +15,25 @@ FullscreenOutput VSFullscreen(uint id : SV_VertexID) {
 	return o;
 }
 
+// The weather's fog in front of the sky (g_WeatherFog: the density it adds to the air, its height profile): the depth
+// of fog towards `dir` from the camera, up and out of the layer or 4 km along the ground, and the light the fog
+// scatters, as the volumetric fog has it (the sun forward scattered, the sky's light from all round). The air's own
+// haze is in the sky already.
+float3 WeatherFogOverSky(float3 color, float3 dir) {
+	if (g_WeatherFog.x <= 0.0) {
+		return color;
+	}
+	float k = max(g_WeatherFog.y, 1e-5);
+	float atCamera = g_WeatherFog.x * exp(-max(g_CameraPos.y - g_WeatherFog.z, 0.0) * k);
+	float depth = atCamera * (dir.y > 1e-3 ? min(1.0 / (k * dir.y), 4000.0) : 4000.0);
+	float c = dot(dir, g_SunDirection.xyz);
+	const float g = 0.45;
+	float phase = (1.0 - g * g) / (4.0 * PI * pow(max(1.0 + g * g - 2.0 * g * c, 1e-4), 1.5));
+	float3 sun = g_SunDirection.w > 0.5 ? g_SunColor.rgb * phase * CloudShadow(g_CameraPos.xyz) : 0.0;
+	float3 sky = (AmbientDiffuse(float3(0.0, 1.0, 0.0)) * 0.6 + AmbientDiffuse(dir) * 0.4) * g_Misc.w;
+	return lerp(color, sun + sky, 1.0 - exp(-depth));
+}
+
 float4 PSSky(FullscreenOutput input) : SV_Target {
 	// the world position of this pixel on a plane in front of the camera gives the view direction
 	float2 ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
@@ -30,6 +49,7 @@ float4 PSSky(FullscreenOutput input) : SV_Target {
 			color = color * cloud.a + cloud.rgb;
 		}
 	}
+	color = WeatherFogOverSky(color, dir);
 	if ((int)g_Misc.x != VIEW_NONE) {
 		color = float3(0.02, 0.02, 0.03);
 	}
@@ -1906,6 +1926,18 @@ float3 PtFollow(int2 p, float3 d, BvhHit hit, float t, bool rasterNormal, int bo
 		float3 V = -d;
 		bool solid;
 		PtSurface s = PtMaterial(hit, t, bounce == 0, solid);
+		// (rain: wet ground darker and smoother, puddles a mirror, as the forward shader has it; the first surface takes
+		// its normal and roughness from the rasterised picture, which has them already)
+		if (g_Weather.x + g_Weather.y > 0.001 && !any(s.emission > 0.0)) {
+			uint cls = (uint)g_Materials[BvhHitMaterial(g_TlasInstances[hit.instance], g_BvhTris[hit.tri]).x].params2.z;
+			if (cls == CLASS_STANDARD || cls == CLASS_COLOR_MASK || cls == CLASS_VEGETATION) {
+				float2 wet = SurfaceWetness(P, Ng, true);
+				float porous = saturate(s.roughness * 1.5 - 0.25) * (1.0 - dot(s.f0, 1.0 / 3.0));
+				s.diffuse *= lerp(1.0, lerp(0.85, 0.45, porous), wet.x) * lerp(1.0, 0.7, wet.y);
+				s.roughness = lerp(lerp(s.roughness, min(s.roughness, 0.22), wet.x), 0.03, wet.y);
+				s.f0 = lerp(s.f0, 0.04, wet.y);
+			}
+		}
 		if (bounce == 0 && rasterNormal && s.coat <= 0.0 && !any(s.emission > 0.0)) {
 			s.roughness = clamp(g_PostAux.Load(int3(p, 0)).z, 0.03, 1.0); // (the rasterised roughness: with the mask map)
 		}
@@ -2047,4 +2079,94 @@ float4 PSPathTraceApply(FullscreenOutput input) : SV_Target {
 		return float4(SafeColor(average.rgb), 1.0);
 	}
 	return average.a > 1e-4 ? float4(average.rgb / average.a, average.a) : 0.0;
+}
+
+// ---- falling rain (g_Weather.z: how hard it rains now). Drawn after the temporal resolve, into a copy of the picture
+// (g_SceneColor; the history must not carry the streaks into the next frame), at the output size; g_PostDepth: the
+// scene's depth (the render size, read by uv), which hides the streaks behind what is nearer.
+// The rain is four layers of drops on cylinders round the camera (1.5, 3.5, 7 and 14 m away). Each layer is cut into
+// cells in which at most one drop falls; a pixel looks into the one cell its ray meets on each layer. A cell's column
+// follows the drop's slanted path (the wind drives the drops sideways while they fall), so the streaks slant with the
+// wind and fall at about 8 m/s. A streak is as long as a drop falls in 1/50 s, and never thinner than a pixel: a drop
+// narrower than that is drawn as a pixel wide, fainter streak (the same light over the pixel). Under a roof there is
+// no rain: one ray up from where the streak is, for the few pixels that show one. No splashes on the ground.
+float RainHash(float3 p) {
+	p = frac(p * float3(0.1031, 0.1030, 0.0973));
+	p += dot(p, p.yzx + 33.33);
+	return frac((p.x + p.y) * p.z);
+}
+
+float4 PSRain(FullscreenOutput input) : SV_Target {
+	float3 color = g_SceneColor.Load(int3(input.position.xy, 0)).rgb;
+	const float density = g_Weather.z;
+	if (density <= 0.0 || ((int)g_Misc.x != VIEW_NONE && (int)g_Misc.x < VIEW_SUN)) {
+		return float4(color, 1.0);
+	}
+	float2 ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
+	float4 farPoint = mul(g_InvViewProj, float4(ndc, 0.5, 1.0));
+	float3 dir = normalize(farPoint.xyz / farPoint.w - g_CameraPos.xyz);
+	float depth = g_PostDepth.SampleLevel(s_PointClamp, input.uv, 0.0).r;
+	float sceneDistance = depth > 0.0 ? length(WorldFromDepth(input.uv, depth) - g_CameraPos.xyz) : 1e9;
+	float across = length(dir.xz);
+	if (across < 0.08) {
+		return float4(color, 1.0); // (straight up or down: the cylinders say nothing there)
+	}
+	// the drops' light: the sky's from all round (a drop shows the sky behind and around it, bent), and the sun
+	// scattered forward through it
+	float3 sky = (AmbientDiffuse(float3(0.0, 1.0, 0.0)) * 0.5 + AmbientDiffuse(-dir) * 0.5) * g_Misc.w;
+	float c = dot(dir, g_SunDirection.xyz);
+	float forward = (1.0 - 0.49) / (4.0 * PI * pow(max(1.0 + 0.49 - 1.4 * c, 1e-4), 1.5));
+	float3 sun = g_SunDirection.w > 0.5 ? g_SunColor.rgb * forward * 0.15 * CloudShadow(g_CameraPos.xyz) : 0.0;
+	float3 dropLight = sky * 1.3 + sun;
+	// the drops' sideways speed round each cylinder, from the wind near the ground (about 70 % of the speed 10 m up)
+	const float fall = 8.0;
+	float angle = atan2(dir.z, dir.x);
+	float2 tangent = float2(-sin(angle), cos(angle));
+	float drift = dot(g_Wind.xy * g_Wind.z * 0.7, tangent) / fall;
+	// one output pixel's height in metres one metre away (g_PassParams.w: 1 / the output's height)
+	float pixelAngle = 2.0 * g_PassParams.w / max(abs(g_Proj[1][1]), 1e-4);
+	const float radii[4] = {14.0, 7.0, 3.5, 1.5};
+	[unroll] for (int layer = 0; layer < 4; ++layer) {
+		float radius = radii[layer];
+		float t = radius / across;
+		if (t >= sceneDistance) {
+			continue;
+		}
+		float y = g_CameraPos.y + dir.y * t;
+		// cells: a whole number round the cylinder (no seam behind the camera); the camera's sideways travel moves them
+		// against it, so the drops stay where they are in the world when the camera turns or slides
+		float cellWidth = 0.05 * (1.0 + radius * 0.2);
+		float cellsRound = max(floor(6.2831853 * radius / cellWidth), 8.0);
+		float width = 6.2831853 * radius / cellsRound;
+		float cellHeight = 1.1 + 0.1 * float(layer);
+		float u = angle / 6.2831853 * cellsRound + dot(g_CameraPos.xz, tangent) / width + drift * y / width;
+		float v = (y + fall * g_WindTime.w) / cellHeight;
+		float3 cell = float3(floor(u), floor(v), float(layer) * 17.0);
+		float chance = RainHash(cell);
+		if (chance > density * 0.85) {
+			continue; // no drop in this cell
+		}
+		float ox = 0.2 + 0.6 * RainHash(cell + 3.7), oy = 0.3 + 0.4 * RainHash(cell + 9.1);
+		float streakLength = fall * 0.02 / cellHeight; // (cell units)
+		float along = abs(frac(v) - oy) / (0.5 * streakLength);
+		float pixel = pixelAngle * t;                     // metres
+		float halfWidth = max(0.0012, 0.5 * pixel);
+		float sideways = abs(frac(u) - ox) * width;       // metres
+		float streak = saturate(1.0 - sideways / halfWidth) * saturate(1.0 - along * along);
+		if (streak <= 0.0) {
+			continue;
+		}
+		// (a drop is a sliver of a pixel at most: its light spread over the pixel's width)
+		float alpha = streak * 0.35 * min(0.0024 / max(pixel, 1e-4), 1.0) * (0.6 + 0.4 * RainHash(cell + 5.3));
+		if (alpha < 0.002) {
+			continue;
+		}
+		float3 at = g_CameraPos.xyz + dir * t;
+		float2 slant = -g_Wind.xy * saturate(g_Wind.z / 9.0) * 0.6;
+		if (g_RayParams.x > 0.5 && RainShelter(at, normalize(float3(slant.x, 1.0, slant.y)), 60.0)) {
+			continue; // (under a roof)
+		}
+		color = lerp(color, dropLight, alpha);
+	}
+	return float4(color, 1.0);
 }

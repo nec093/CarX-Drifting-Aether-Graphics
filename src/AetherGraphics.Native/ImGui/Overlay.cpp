@@ -769,6 +769,22 @@ void ValueRow(const char* label, const char* help, const std::string& value) {
 	ImGui::TextUnformatted(value.c_str());
 }
 
+std::string HoursText(float hours) {
+	const int minutes = int(std::fmod(hours, 24.0f) * 60.0f + 0.5f) % (24 * 60);
+	return Format("%d:%02d", minutes / 60, minutes % 60);
+}
+
+// a day of the year as a date ("June 21"), for the slider's text (a non leap year)
+std::string DateText(int day) {
+	static const char* months[] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
+	static const int lengths[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+	int d = std::min(std::max(day, 1), 365), m = 0;
+	while (d > lengths[m]) {
+		d -= lengths[m++];
+	}
+	return Format("%s %d", months[m], d);
+}
+
 std::string KeyName(int vk) {
 	if (vk >= VK_F1 && vk <= VK_F24) {
 		return Format("F%d", vk - VK_F1 + 1);
@@ -1239,10 +1255,51 @@ void SkyPage(const SettingsData& s) {
 	static const char* skyText[] = {"Physical sky (time of day)", "The scene's own sky"};
 	ChoiceRow("Sky", nullptr, "skyMode", s.skyMode, skyModes, skyText, 2);
 	ImGui::BeginDisabled(s.skyMode == "scene");
-	SliderRow("Time of day", nullptr, "timeOfDay", s.timeOfDay, 0.0f, 24.0f, "%.2f h");
-	SliderRow("Sun heading", "Turns the sun's path about the up axis.", "sunHeading", s.sunHeading, 0.0f, 360.0f, "%.0f deg");
-	SliderRow("Clouds", "How much of the sky the clouds cover.", "cloudCoverage", s.cloudCoverage, 0.0f, 1.0f, "%.2f");
-	SliderRow("Cloud speed", nullptr, "cloudSpeed", s.cloudSpeed, 0.0f, 4.0f, "%.1f");
+	SliderRow("Time of day", s.timeFlow == "stopped" ? nullptr : Format("Now %s on the way (the time moves on from here).", HoursText(SceneRenderer::Get().CurrentHours()).c_str()).c_str(), "timeOfDay", s.timeOfDay, 0.0f, 24.0f, "%.2f h");
+	static const char* flows[] = {"stopped", "realtime", "fast"};
+	static const char* flowText[] = {"Stopped", "Real time", "Fast (an hour a minute)"};
+	ChoiceRow("Time flow", nullptr, "timeFlow", s.timeFlow, flows, flowText, 3);
+	Label("Date", "The sun's path through the day changes with the season. Today: the calendar's date.");
+	{
+		bool today = s.dayOfYear <= 0;
+		if (SwitchWidget("today", today)) {
+			Settings::Get().Set("dayOfYear", today ? SceneRenderer::Get().CurrentDay() : 0, "overlay");
+		}
+	}
+	if (s.dayOfYear > 0) {
+		IntSliderRow("Day of the year", nullptr, "dayOfYear", s.dayOfYear, 1, 365, DateText(s.dayOfYear).c_str());
+	}
+	SliderRow("Latitude", "Where on the earth the map lies: the sun's height (Japan about 35).", "latitude", s.latitude, -66.0f, 66.0f, "%.1f deg");
+	SliderRow("North", "Turns the sun's path about the up axis: where the map's north is.", "sunHeading", s.sunHeading, 0.0f, 360.0f, "%.0f deg");
+	ImGui::EndDisabled();
+	CardEnd();
+
+	CardBegin("Weather", "Changes ease in over about 20 seconds. The ground gets wet in a minute or two of rain and dries over about ten minutes.");
+	static const char* weathers[] = {"clear", "cloudy", "overcast", "rain", "fog"};
+	static const char* weatherText[] = {"Clear", "Cloudy", "Overcast", "Rain", "Fog"};
+	ChoiceRow("Weather", nullptr, "weather", s.weather, weathers, weatherText, 5);
+	if (s.weather == "rain") {
+		SliderRow("Rain", "How hard it rains: the streaks, how fast the ground gets wet, how large the puddles grow.", "rainIntensity", s.rainIntensity, 0.0f, 1.0f, "%.2f");
+	}
+	ImGui::BeginDisabled(s.skyMode == "scene");
+	SliderRow("Clouds at least", "The weather brings its own clouds; this is the least there are.", "cloudCoverage", s.cloudCoverage, 0.0f, 1.0f, "%.2f");
+	ImGui::EndDisabled();
+	{
+		const float wet = SceneRenderer::Get().Wetness(), puddles = SceneRenderer::Get().Puddles();
+		ValueRow("Ground", "How wet the ground is now, and how much of the level ground stands under water.", wet + puddles <= 0.005f ? std::string("Dry") : Format("%.0f %% wet, puddles %.0f %%", wet * 100.0f, puddles * 100.0f));
+	}
+	CardEnd();
+
+	CardBegin("Wind", "Plants sway, clouds and tyre smoke drift, rain slants.");
+	SliderRow("Speed", "10 m above the ground. 3: a light breeze, 10: a fresh wind, 20: a gale.", "windSpeed", s.windSpeed, 0.0f, 25.0f, "%.1f m/s");
+	{
+		static const char* compass[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+		const int at = int(std::fmod(s.windDirection + 22.5f, 360.0f) / 45.0f) % 8;
+		SliderRow("From", "Where the wind comes from, as weather reports say (0 the map's north, 90 the east).", "windDirection", s.windDirection, 0.0f, 360.0f, Format("%%.0f deg (%s)", compass[at]).c_str());
+	}
+	SliderRow("Gusts", "0: a steady wind. Gusts sweep across along the wind.", "gustiness", s.gustiness, 0.0f, 1.0f, "%.2f");
+	ImGui::BeginDisabled(s.skyMode == "scene");
+	SliderRow("Cloud speed", "Factor on how fast the wind carries the clouds.", "cloudSpeed", s.cloudSpeed, 0.0f, 4.0f, "%.1f");
 	ImGui::EndDisabled();
 	CardEnd();
 
@@ -1253,7 +1310,7 @@ void SkyPage(const SettingsData& s) {
 
 	CardBegin("Fog");
 	SwitchRow("Volumetric fog", "Fog lit by the sun through the shadow map (light shafts), where the scene has fog.", "volumetricFog", s.volumetricFog);
-	SliderRow("Density", "Factor on the fog: the physical sky's haze, or else the scene's fog.", "fogStrength", s.fogStrength, 0.0f, 20.0f, "%.1f");
+	SliderRow("Density", "Factor on the fog: the physical sky's haze, or else the scene's fog, and the weather's fog on top.", "fogStrength", s.fogStrength, 0.0f, 20.0f, "%.1f");
 	CardEnd();
 }
 

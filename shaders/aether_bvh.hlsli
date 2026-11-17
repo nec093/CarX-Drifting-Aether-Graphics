@@ -172,6 +172,63 @@ float BvhOccluderDistance(float3 o, float3 d, float tMax) {
 	return -1.0;
 }
 
+// ---- the rain on surfaces (g_Weather): shared by the forward shader and the path tracer
+
+// Whether something solid stands over P against the rain coming from `d` (up, slanted against the wind): a roof, a
+// bridge, a tunnel. Cars and plants do not count (the road under a moving car must not dry with its outline, and rain
+// comes through trees), nor what an alpha tested material cuts away. Up to three hits are looked past.
+bool RainShelter(float3 o, float3 d, float tMax) {
+	float travelled = 0.0;
+	[loop] for (int attempt = 0; attempt < 3; ++attempt) {
+		BvhHit hit = BvhTraceEx(o, d, tMax - travelled, false, true);
+		if (hit.t < 0.0) {
+			return false;
+		}
+		travelled += hit.t;
+		uint2 entry = BvhHitMaterial(g_TlasInstances[hit.instance], g_BvhTris[hit.tri]);
+		uint cls = (uint)g_Materials[entry.x].params2.z;
+		bool passes = cls == CLASS_VEGETATION || (cls >= CLASS_VEHICLE_PAINT && cls <= CLASS_VEHICLE_STITCHES) || cls == CLASS_VEHICLE_LIGHTS || cls == CLASS_VEHICLE_TIRE || cls == CLASS_TRANSPARENT;
+		if (!passes && BvhHitSolid(hit, travelled)) {
+			return true;
+		}
+		o += d * (hit.t + 0.02);
+		travelled += 0.02;
+	}
+	return false;
+}
+
+float WeatherNoise(float2 p) {
+	float2 i = floor(p), f = frac(p);
+	float2 u = f * f * (3.0 - 2.0 * f);
+	float4 h = frac(sin(float4(dot(i, float2(127.1, 311.7)), dot(i + float2(1, 0), float2(127.1, 311.7)), dot(i + float2(0, 1), float2(127.1, 311.7)), dot(i + float2(1, 1), float2(127.1, 311.7)))) * 43758.5453);
+	return lerp(lerp(h.x, h.y, u.x), lerp(h.z, h.w, u.x), u.y);
+}
+
+// How wet a surface is (x, 0 .. 1) and how much of it lies under a puddle (y), at P with the geometric normal n
+// (facing out). Faces that look up get the rain; walls a little (the wind drives it on them); puddles only on level
+// ground, where a world space noise lets them be (larger with more rain). `shelter`: look up for a roof (a ray).
+float2 SurfaceWetness(float3 P, float3 n, bool shelter) {
+	if (g_Weather.x + g_Weather.y <= 0.001) {
+		return 0.0;
+	}
+	float2 r = float2(g_Weather.x * smoothstep(-0.2, 0.85, n.y), 0.0);
+	float level = smoothstep(0.965, 0.995, n.y);
+	if (g_Weather.y > 0.001 && level > 0.0) {
+		float noise = WeatherNoise(P.xz / 4.5) * 0.65 + WeatherNoise(P.xz / 1.4 + 11.3) * 0.35;
+		float edge = 1.0 - 0.45 * g_Weather.y;
+		r.y = smoothstep(edge, edge + 0.06, noise) * level;
+	}
+	r.x = max(r.x, r.y);
+	if (shelter && g_RayParams.x > 0.5 && r.x > 0.002) {
+		// (the rain comes down slanted from where the wind blows from)
+		float2 slant = -g_Wind.xy * saturate(g_Wind.z / 9.0) * 0.6;
+		if (RainShelter(P + n * 0.05, normalize(float3(slant.x, 1.0, slant.y)), 60.0)) {
+			r = 0.0;
+		}
+	}
+	return r;
+}
+
 // The sun's visibility at P by one ray towards the middle of its disc (hard: for what has no denoised mask, glass
 // and the surfaces rays land on). `n`: the surface's normal (the ray starts a little off it).
 float RaySunShadow(float3 P, float3 n) {
