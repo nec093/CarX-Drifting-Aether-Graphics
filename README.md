@@ -97,6 +97,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch-game.ps1     
 | [docs/architecture/gpu-resources.md](docs/architecture/gpu-resources.md) | GPU リソースの管理と VRAM の内訳 |
 | [docs/diagnostics/mcp-api.md](docs/diagnostics/mcp-api.md) | MCP ツールのリファレンス |
 | [docs/diagnostics/troubleshooting.md](docs/diagnostics/troubleshooting.md) | うまく動かないとき |
+| [docs/design/custom-maps.md](docs/design/custom-maps.md) | 独自マップと世界の表現の設計（計画中：巨大マップ、植生、光、季節・風・天気、当たり判定、パーティクル） |
 | [AGENT.md](AGENT.md) | このリポジトリで作業するエージェントへの指示 |
 
 ## 第三者のソフトウェア
